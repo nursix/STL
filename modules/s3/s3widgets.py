@@ -7084,12 +7084,41 @@ class S3HierarchyWidget(FormWidget):
                          )
         else:
             header = ""
-        widget = DIV(INPUT(_type = "hidden",
-                           _multiple = "multiple",
-                           _name = name,
-                           _id = selector,
-                           _class = "s3-hierarchy-input",
-                           requires = self.parse),
+
+        # Currently selected values
+        selected = []
+        append = selected.append
+        if isinstance(value, basestring) and value and not value.isdigit():
+            value = self.parse(value)[0]
+        if not isinstance(value, (list, tuple, set)):
+            values = [value]
+        else:
+            values = value
+        for v in values:
+            if isinstance(v, (int, long)) or str(v).isdigit():
+                append(v)
+
+        # Prepend value parser to field validator
+        requires = field.requires
+        if isinstance(requires, (list, tuple)):
+            requires = [self.parse] + requires
+        elif requires is not None:
+            requires = [self.parse, requires]
+        else:
+            requires = self.parse
+
+        # The hidden input field
+        hidden_input = INPUT(_type = "hidden",
+                             _multiple = "multiple",
+                             _name = name,
+                             _id = selector,
+                             _class = "s3-hierarchy-input",
+                             requires = requires,
+                             value = json.dumps(selected),
+                             )
+
+        # The widget
+        widget = DIV(hidden_input,
                      DIV(header,
                          DIV(h.html("%s-tree" % widget_id,
                                     none=self.none,
@@ -7104,17 +7133,6 @@ class S3HierarchyWidget(FormWidget):
         s3 = current.response.s3
         scripts = s3.scripts
         script_dir = "/%s/static/scripts" % current.request.application
-
-        # Currently selected values
-        selected = []
-        append = selected.append
-        if not isinstance(value, (list, tuple, set)):
-            values = [value]
-        else:
-            values = value
-        for v in values:
-            if isinstance(v, (int, long)) or str(v).isdigit():
-                append(v)
 
         # Custom theme
         theme = settings.get_ui_hierarchy_theme()
@@ -7195,6 +7213,7 @@ class S3HierarchyWidget(FormWidget):
             return default, None
         if not self.multiple and isinstance(value, list):
             value = value[0] if value else None
+
         return value, None
 
 # =============================================================================
@@ -7894,14 +7913,15 @@ class S3TimeIntervalWidget(FormWidget):
 # =============================================================================
 class S3UploadWidget(UploadWidget):
     """
-        Subclassed to not show the delete checkbox when field is mandatory
-            - This now been included as standard within Web2Py from r2867
-            - Leaving this unused example in the codebase so that we can easily
-              amend this if we wish to later
+        Subclass for use in inline-forms
+
+        - always renders all widget elements (even when empty), so that
+          they can be updated from JavaScript
+        - adds CSS selectors for widget elements
     """
 
-    @staticmethod
-    def widget(field, value, download_url=None, **attributes):
+    @classmethod
+    def widget(cls, field, value, download_url=None, **attributes):
         """
         generates a INPUT file tag.
 
@@ -7914,33 +7934,77 @@ class S3UploadWidget(UploadWidget):
 
         """
 
-        default=dict(
-            _type="file",
-            )
-        attr = UploadWidget._attributes(field, default, **attributes)
+        T = current.T
 
-        inp = INPUT(**attr)
+        # File input
+        default = {"_type": "file",
+                   }
+        attr = cls._attributes(field, default, **attributes)
 
+        # File URL
+        base_url = "/default/download"
         if download_url and value:
-            url = "%s/%s" % (download_url, value)
-            (br, image) = ("", "")
-            if UploadWidget.is_image(value):
-                br = BR()
-                image = IMG(_src = url, _width = UploadWidget.DEFAULT_WIDTH)
-
-            requires = attr["requires"]
-            if requires == [] or isinstance(requires, IS_EMPTY_OR):
-                inp = DIV(inp, "[",
-                          A(UploadWidget.GENERIC_DESCRIPTION, _href = url),
-                          "|",
-                          INPUT(_type="checkbox",
-                                _name=field.name + UploadWidget.ID_DELETE_SUFFIX),
-                          UploadWidget.DELETE_FILE,
-                          "]", br, image)
+            if callable(download_url):
+                url = download_url(value)
             else:
-                inp = DIV(inp, "[",
-                          A(UploadWidget.GENERIC_DESCRIPTION, _href = url),
-                          "]", br, image)
+                base_url = download_url
+                url = download_url + "/" + value
+        else:
+            url = None
+
+        # Download-link
+        link = SPAN("[",
+                    A(T(cls.GENERIC_DESCRIPTION),
+                      _href = url,
+                      ),
+                    _class = "s3-upload-link",
+                    _style = "white-space:nowrap",
+                    )
+
+        # Delete-checkbox
+        requires = attr["requires"]
+        if requires == [] or isinstance(requires, IS_EMPTY_OR):
+            name = field.name + cls.ID_DELETE_SUFFIX
+            delete_checkbox = TAG[""]("|",
+                                      INPUT(_type = "checkbox",
+                                            _name = name,
+                                            _id = name,
+                                            ),
+                                      LABEL(T(cls.DELETE_FILE),
+                                            _for = name,
+                                            _style = "display:inline",
+                                            ),
+                                      )
+            link.append(delete_checkbox)
+
+        # Complete link-element
+        link.append("]")
+        if not url:
+            link.add_class("hide")
+
+        # Image preview
+        preview_class = "s3-upload-preview"
+        if value and cls.is_image(value):
+            preview_url = url
+        else:
+            preview_url = None
+            preview_class = "%s hide" % preview_class
+        image = DIV(IMG(_alt = T("Loading"),
+                        _src = preview_url,
+                        _width = cls.DEFAULT_WIDTH,
+                        ),
+                    _class = preview_class,
+                    )
+
+        # Construct the widget
+        inp = DIV(INPUT(**attr),
+                  link,
+                  image,
+                  _class="s3-upload-widget",
+                  data = {"base": base_url,
+                          },
+                  )
+
         return inp
 
 # =============================================================================
@@ -8739,7 +8803,7 @@ class ICON(I):
             "bar-chart": "fa-bar-chart",
             "book": "fa-book",
             "bookmark": "fa-bookmark",
-            "bookmark-empty": "fa-bookmark-empty",
+            "bookmark-empty": "fa-bookmark-o",
             "briefcase": "fa-briefcase",
             "calendar": "fa-calendar",
             "certificate": "fa-certificate",
@@ -8752,16 +8816,20 @@ class ICON(I):
             "done": "fa-check",
             "down": "fa-caret-down",
             "edit": "fa-edit",
+            "event": "fa-bolt",
             "exclamation": "fa-exclamation",
             "facebook": "fa-facebook",
             "facility": "fa-home",
             "file": "fa-file",
             "file-alt": "fa-file-alt",
+            "flag": "fa-flag",
+            "flag-alt": "fa-flag-o",
             "folder-open-alt": "fa-folder-open-o",
             "fullscreen": "fa-fullscreen",
             "globe": "fa-globe",
             "goods": "fa-cubes",
             "group": "fa-group",
+            "hint": "fa-hand-o-right",
             "home": "fa-home",
             "inactive": "fa-check-empty",
             "incident": "fa-bolt",
@@ -8788,6 +8856,7 @@ class ICON(I):
             "rss": "fa-rss",
             "sent": "fa-check",
             "settings": "fa-wrench",
+            "share": "fa-share-alt",
             "shipment": "fa-truck",
             "site": "fa-home",
             "skype": "fa-skype",
@@ -8832,6 +8901,8 @@ class ICON(I):
             "facility": "fi-home",
             "file": "fi-page-filled",
             "file-alt": "fi-page",
+            "flag": "fi-flag",
+            "flag-alt": "fi-flag",
             "folder-open-alt": "fi-folder",
             "fullscreen": "fi-arrows-out",
             "globe": "fi-map",
@@ -8859,6 +8930,7 @@ class ICON(I):
             "rss": "fi-rss",
             "sent": "fi-check",
             "settings": "fi-wrench",
+            "share": "fi-share",
             "site": "fi-home",
             "skype": "fi-social-skype",
             "star": "fi-star",
@@ -8901,6 +8973,8 @@ class ICON(I):
             "facility": "icon-home",
             "file": "icon-file",
             "file-alt": "icon-file-alt",
+            "flag": "icon-flag",
+            "flag-alt": "icon-flag-alt",
             "folder-open-alt": "icon-folder-open-alt",
             "fullscreen": "icon-fullscreen",
             "globe": "icon-globe",
@@ -8928,6 +9002,7 @@ class ICON(I):
             "rss": "icon-rss",
             "sent": "icon-ok",
             "settings": "icon-wrench",
+            "share": "icon-share",
             "site": "icon-home",
             "skype": "icon-skype",
             "star": "icon-star",

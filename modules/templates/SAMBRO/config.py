@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import json
+import os
 
 from collections import OrderedDict
 
@@ -9,7 +10,7 @@ from gluon.html import *
 from gluon.storage import Storage
 from gluon.languages import lazyT
 
-from s3 import FS, s3_str
+from s3 import FS, s3_str, s3_truncate, s3_utc
 
 def config(settings):
     """
@@ -109,12 +110,13 @@ def config(settings):
         #("prs", "دری"),        # Dari
         #("ps", "پښتو"),        # Pashto
         #("tet", "Tetum"),
-        #("th", "ภาษาไทย"),        # Thai
+        ("th", "ภาษาไทย"),        # Thai
         ("tl", "Tagalog"), # Filipino
         #("vi", "Tiếng Việt"),   # Vietnamese
         #("zh-cn", "中文 (简体)"),
     ])
     settings.cap.languages = languages
+    settings.L10n.languages = languages
     # Translate the cap_area name
     settings.L10n.translate_cap_area = True
 
@@ -181,7 +183,7 @@ def config(settings):
     def customise_msg_rss_channel_controller(**attr):
 
         s3 = current.response.s3
-        table = current.s3db.msg_rss_channel        
+        table = current.s3db.msg_rss_channel
         type = current.request.get_vars.get("type", None)
         if type == "cap":
             # CAP RSS Channel
@@ -219,8 +221,7 @@ def config(settings):
                                                     )
                     restrict_e = [str(row.id) for row in rows if not row.enabled]
                     restrict_d = [str(row.id) for row in rows if row.enabled]
-        
-                    from s3 import s3_str
+
                     s3.actions = [dict(label=s3_str(T("Open")),
                                        _class="action-btn edit",
                                        url=URL(args=["[id]", "update"],
@@ -300,6 +301,29 @@ def config(settings):
 
     # -------------------------------------------------------------------------
     def customise_org_organisation_resource(r, tablename):
+
+        s3 = current.response.s3
+
+        crud_strings_branch = Storage(
+            label_create = T("Add Branch"),
+            title_display = T("Branch Details"),
+            title_list = T("Branches"),
+            title_update = T("Edit Branch"),
+            title_upload = T("Import Branches"),
+            label_list_button = T("List Branches"),
+            label_delete_button = T("Delete Branch"),
+            msg_record_created = T("Branch added"),
+            msg_record_modified = T("Branch updated"),
+            msg_record_deleted = T("Branch deleted"),
+            msg_list_empty = T("No Branches currently registered"))
+
+        if r.component_name == "branch":
+            # Make sure branch uses same form as organisation because we need CAP OID
+            r.component.actuate = "replace"
+            s3.crud_strings[tablename] = crud_strings_branch
+
+        if r.method == "hierarchy":
+            s3.crud_strings[tablename] = crud_strings_branch
 
         from s3 import S3SQLCustomForm, S3SQLInlineComponent, S3SQLInlineLink
         crud_form = S3SQLCustomForm("name",
@@ -400,11 +424,14 @@ def config(settings):
             # Single row as we are filtering for particular alert_id
             arow = data["rows"][0]
 
+            # Create attachment
+            cap_document_id = _get_or_create_attachment(alert_id)
+
             if record["scope"] != "Private" and data["numrows"] > 0:
                 # Google Cloud Messaging
                 stable = s3db.pr_subscription
                 ctable = s3db.pr_contact
-    
+
                 query = (stable.pe_id == ctable.pe_id) & \
                         (ctable.contact_method == "GCM") & \
                         (ctable.value != None) & \
@@ -468,8 +495,8 @@ def config(settings):
                 get_user_id = current.auth.s3_get_user_id
                 query_ = (gtable.id == mtable.group_id) & \
                          (mtable.person_id == ptable.id) & \
-                         (gtable.deleted != True) &\
-                         (mtable.deleted != True) &\
+                         (gtable.deleted != True) & \
+                         (mtable.deleted != True) & \
                          (ptable.deleted != True)
                 count = len(addresses)
                 if count == 1:
@@ -487,7 +514,10 @@ def config(settings):
                                                                     system=False)),
                                                     "</html>")
                         sms_content = get_sms_content(arow, ack_id=ack_id, system=False)
-                        send_by_pe_id(row.pe_id, subject, email_content)
+                        send_by_pe_id(row.pe_id,
+                                      subject,
+                                      email_content,
+                                      document_ids=cap_document_id)
                         try:
                             send_by_pe_id(row.pe_id, subject, sms_content, contact_method="SMS")
                         except ValueError:
@@ -499,7 +529,10 @@ def config(settings):
                                                 "</html>")
                     sms_content = get_sms_content(arow, system=False)
                     for row in rows:
-                        send_by_pe_id(row.pe_id, subject, email_content)
+                        send_by_pe_id(row.pe_id,
+                                      subject,
+                                      email_content,
+                                      document_ids=cap_document_id)
                         try:
                             send_by_pe_id(row.pe_id, subject, sms_content, contact_method="SMS")
                         except ValueError:
@@ -573,7 +606,6 @@ def config(settings):
                 table = r.table
                 table.apitype.default = "ftp"
                 table.apitype.readable = table.apitype.writable = False
-                table.accept_push.readable = table.accept_push.writable = False
                 table.synchronise_uuids.readable = \
                                         table.synchronise_uuids.writable = False
                 table.uuid.readable = table.uuid.writable = False
@@ -709,7 +741,6 @@ def config(settings):
             @param format: the contents format ("text" or "html")
         """
 
-        from s3 import s3_utc
         notify_on = meta_data["notify_on"]
         last_check_time = meta_data["last_check_time"]
         rows = data["rows"]
@@ -772,11 +803,11 @@ def config(settings):
         """
 
         rows = data["rows"]
-        subject = "%s $s %s" % (T("SAHANA"), T("Alert Notification"))
+        subject = "%s %s" % (current.deployment_settings.get_system_name_short(),
+                             T("Alert Notification"))
         if len(rows) == 1:
             # Since if there are more than one row, the single email has content
             # for all rows
-            from s3 import s3_utc
             last_check_time = meta_data["last_check_time"]
             db = current.db
             atable = current.s3db.cap_alert
@@ -789,6 +820,27 @@ def config(settings):
         return subject
 
     settings.msg.notify_subject = custom_msg_notify_subject
+
+    # -----------------------------------------------------------------------------
+    def custom_msg_notify_attachment(resource, data, meta_data):
+        """
+            Custom Method to get the document_ids to be sent as attachment
+            @param resource: the S3Resource
+            @param data: the data returned from S3Resource.select
+            @param meta_data: the meta data for the notification
+        """
+
+        rows = data["rows"]
+        document_ids = []
+        dappend = document_ids.append
+        for row in rows:
+            alert_id = row["cap_alert.id"]
+            document_id = _get_or_create_attachment(alert_id)
+            dappend(document_id)
+
+        return document_ids
+
+    settings.msg.notify_attachment = custom_msg_notify_attachment
 
     # -------------------------------------------------------------------------
     # Comment/uncomment modules here to disable/enable them
@@ -932,6 +984,8 @@ def config(settings):
             etable = s3db.event_event_type
             ptable = s3db.cap_warning_priority
             filter_options = {}
+            from s3 import IS_ISO639_2_LANGUAGE_CODE
+            languages_dict = dict(IS_ISO639_2_LANGUAGE_CODE.language_codes())
             for row in rows:
                 event_type = None
                 priorities_id = []
@@ -956,19 +1010,19 @@ def config(settings):
                             rows_ = db(ptable.id.belongs(priorities_id)).select(ptable.name)
                             priorities = [row_.name for row_ in rows_]
                         elif prefix == "info.language__belongs":
-                            languages = [s3_str(value) for value in values]
+                            languages = [s3_str(languages_dict[value]) for value in values]
                     if event_type is not None:
                         display_text = "<b>%s:</b> %s" % (T("Event Type"), event_type)
                     else:
-                        display_text = "<b>%s</b>" % (T("Event Type: None"))
+                        display_text = "<b>%s:</b> %s" % (T("Event Type"), T("No filter"))
                     if len(priorities_id) > 0:
-                        display_text = "%s<br/><b>%s</b>: %s" % (display_text, T("Priorities"), priorities)
+                        display_text = "%s<br/><b>%s</b>: %s" % (display_text, T("Priorities"), ", ".join(priorities))
                     else:
-                        display_text = "%s<br/><b>%s</b>" % (display_text, T("Priorities: None"))
+                        display_text = "%s<br/><b>%s:</b> %s" % (display_text, T("Priorities"), T("No filter"))
                     if len(languages) > 0:
-                        display_text = "%s<br/><b>%s</b>:%s" % (display_text, T("Languages"), languages)
+                        display_text = "%s<br/><b>%s:</b> %s" % (display_text, T("Languages"), ", ".join(languages))
                     else:
-                        display_text = "%s<br/><b>%s</b>" % (display_text, T("Languages: None"))
+                        display_text = "%s<br/><b>%s:</b> %s" % (display_text, T("Languages"), T("No filter"))
                     filter_options[row["pr_subscription.filter_id"]] = display_text
                 else:
                     filter_options[row["pr_subscription.filter_id"]] = T("No filters")
@@ -991,9 +1045,11 @@ def config(settings):
         response_type = row["cap_info.response_type"]
         instruction = row["cap_info.instruction"]
         description = row["cap_info.description"]
+        status = row["cap_alert.status"]
 
         if event_type_id and event_type_id != current.messages["NONE"]:
-            if not isinstance(event_type_id, lazyT):
+            if not isinstance(event_type_id, lazyT) and \
+               not isinstance(event_type_id, DIV):
                 event_type = itable.event_type_id.represent(event_type_id)
             else:
                 event_type = event_type_id
@@ -1001,7 +1057,8 @@ def config(settings):
             event_type = T("None")
 
         if priority_id and priority_id != current.messages["NONE"]:
-            if not isinstance(priority_id, lazyT):
+            if not isinstance(priority_id, lazyT) and \
+               not isinstance(priority_id, DIV):
                 priority = itable.priority.represent(priority_id)
             else:
                 priority = priority_id
@@ -1009,13 +1066,18 @@ def config(settings):
             priority = T("Alert")
 
         email_content = TAG[""](HR(), BR(),
+                         B(s3_str("%s %s %s" % (T(status.upper()),
+                                                T(status.upper()),
+                                                T(status.upper()))))
+                         if status != "Actual" else "",
+                         BR() if status != "Actual" else "",
+                         BR() if status != "Actual" else "",
                          A(T("VIEW ALERT ON THE WEB"),
                            _href = "%s/%s" % (s3_str(row["cap_info.web"]), "profile")),
                          BR(), BR(),
-                         T("%(scope)s %(status)s Alert") % \
-                         {"scope": s3_str(row["cap_alert.scope"]),
-                          "status": s3_str(row["cap_alert.status"]),
-                          },
+                         B(s3_str("%s %s Alert" % (T(row["cap_alert.scope"]),
+                                                   T(status)
+                                                   ))),
                          H2(T(s3_str(get_formatted_value(row["cap_info.headline"],
                                                          system=system)))),
                          BR(),
@@ -1028,7 +1090,7 @@ def config(settings):
                           "area_description": s3_str(get_formatted_value(row["cap_area.name"],
                                                                          system=system)),
                          },
-                         BR(),
+                         BR(), BR(),
                          T("This %(severity)s %(event_type)s is %(urgency)s and is %(certainty)s") %\
                          {"severity": s3_str(row["cap_info.severity"]),
                           "event_type": s3_str(event_type),
@@ -1091,6 +1153,12 @@ def config(settings):
                          {"ack_link": "%s%s" % (current.deployment_settings.get_base_public_url(),
                                                 URL(c="cap", f="alert_ack", args=[ack_id, "update"])),
                           } if ack_id else "",
+                         BR() if ack_id else "",
+                         BR() if ack_id else "",
+                         B(s3_str("%s %s %s" % (T(status.upper()),
+                                                T(status.upper()),
+                                                T(status.upper()))))
+                         if status != "Actual" else "",
                          )
 
         return email_content
@@ -1103,32 +1171,23 @@ def config(settings):
 
         itable = current.s3db.cap_info
         event_type_id = row["cap_info.event_type_id"]
-        priority_id = row["cap_info.priority"]
+        msg_type = T(row["cap_alert.msg_type"])
 
         if event_type_id and event_type_id != current.messages["NONE"]:
-            if not isinstance(event_type_id, lazyT):
+            if not isinstance(event_type_id, lazyT) and \
+               not isinstance(event_type_id, DIV):
                 event_type = itable.event_type_id.represent(event_type_id)
             else:
                 event_type = event_type_id
         else:
             event_type = T("None")
 
-        if priority_id and priority_id != current.messages["NONE"]:
-            if not isinstance(priority_id, lazyT):
-                priority = itable.priority.represent(priority_id)
-            else:
-                priority = priority_id
-        else:
-            priority = T("Alert")
-
         subject = "[%s] %s %s" % (get_formatted_value(row["cap_info.sender_name"],
                                                       system=system),
                                   event_type,
-                                  priority)
-        if len(subject) > 78: # RFC 2822
-            subject = "%s $s %s" % (T("SAHANA"), T("Alert Notification"))
-
-        return subject
+                                  msg_type)
+        # RFC 2822
+        return s3_str(s3_truncate(subject, length=78))
 
     # -------------------------------------------------------------------------
     def get_sms_content(row, ack_id=None, system=True):
@@ -1144,13 +1203,15 @@ def config(settings):
         event_type_id = row["cap_info.event_type_id"]
         priority_id = row["cap_info.priority"]
 
-        if not isinstance(event_type_id, lazyT):
+        if not isinstance(event_type_id, lazyT) and \
+           not isinstance(event_type_id, DIV):
             event_type = itable.event_type_id.represent(event_type_id)
         else:
             event_type = event_type_id
 
-        if priority_id and priority_id != "-":
-            if not isinstance(priority_id, lazyT):
+        if priority_id and priority_id != current.messages["NONE"]:
+            if not isinstance(priority_id, lazyT) and \
+               not isinstance(priority_id, DIV):
                 priority = itable.priority.represent(priority_id)
             else:
                 priority = priority_id
@@ -1175,7 +1236,7 @@ T("""%(status)s %(message_type)s for %(area_description)s with %(priority)s prio
                  }
         else:
             sms_body = \
-T("""%(status)s %(message_type)s for %(area_description)s with %(priority)s priority %(event_type)s issued by %(sender_name)s at %(date)s (ID:%(identifier)s) \n\n""") % \
+T("""%(status)s %(message_type)s for %(area_description)s with %(priority)s priority %(event_type)s issued by %(sender_name)s at %(date)s (ID:%(identifier)s).  \nView Alert in web at %(profile)s \n\n""") % \
                 {"status": s3_str(row["cap_alert.status"]),
                  "message_type": s3_str(row["cap_alert.msg_type"]),
                  "area_description": s3_str(get_formatted_value(row["cap_area.name"],
@@ -1186,6 +1247,7 @@ T("""%(status)s %(message_type)s for %(area_description)s with %(priority)s prio
                                                            system=system)),
                  "date": s3_str(row["cap_alert.sent"]),
                  "identifier": s3_str(row["cap_alert.identifier"]),
+                 "profile": "%s/%s" % (s3_str(row["cap_info.web"]), "profile"),
                  }
 
         return s3_str(sms_body)
@@ -1335,5 +1397,67 @@ T("""%(status)s %(message_type)s for %(area_description)s with %(priority)s prio
                         nvalue = value
 
                 return nvalue
+
+    # -------------------------------------------------------------------------
+    def _get_or_create_attachment(alert_id):
+        """ 
+            Retrieve the CAP attachment for the alert_id if present
+            else creates CAP file as attachment to be sent with the email
+            returns the document_id for the CAP file
+        """
+
+        s3db = current.s3db
+        rtable = s3db.cap_resource
+        dtable = s3db.doc_document
+        query = (rtable.alert_id == alert_id) & \
+                (rtable.mime_type == "cap") & \
+                (rtable.deleted != True) & \
+                (dtable.doc_id == rtable.doc_id) & \
+                (dtable.deleted != True)
+        row = current.db(query).select(dtable.id, limitby=(0, 1)).first()
+        if row and row.id:
+            return row.id
+
+        request = current.request
+        auth = current.auth
+        path_join = os.path.join
+
+        # Create the cap_resource table
+        record = {"alert_id": alert_id,
+                  "resource_desc": T("CAP XML File"),
+                  "mime_type": "cap" # Hard coded to separate from attachment from user
+                  }
+        resource_id = rtable.insert(**record)
+        record["id"] = resource_id
+        s3db.update_super(rtable, record)
+        doc_id = record["doc_id"]
+        auth.s3_set_record_owner(rtable, resource_id)
+        auth.s3_make_session_owner(rtable, resource_id)
+        s3db.onaccept("cap_resource", record, method="create")
+
+        resource = s3db.resource("cap_alert")
+        resource.add_filter(FS("id") == alert_id)
+        cap_xml = resource.export_xml(stylesheet=path_join(request.folder,
+                                                           "static",
+                                                           "formats",
+                                                           "cap",
+                                                           "export.xsl"),
+                                      pretty_print=True)
+        file_path = path_join(request.folder,
+                              "uploads",
+                              "%s_%s.xml" % ("cap_alert", str(alert_id)))
+        file = open(file_path, "w+")
+        file.write(cap_xml)
+        file.close()
+
+        # Create doc_document record
+        dtable = s3db.doc_document
+        file = open(file_path, "a+")
+        document_id = dtable.insert(**{"file": file, "doc_id": doc_id})
+
+        file.close()
+        os.remove(file_path)
+
+        return document_id
 
 # END =========================================================================

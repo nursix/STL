@@ -30,6 +30,7 @@
 __all__ = ("get_cap_options",
            "S3CAPModel",
            "S3CAPHistoryModel",
+           "S3CAPAlertingAuthorityModel",
            "S3CAPAreaNameModel",
            "cap_alert_is_template",
            "cap_rheader",
@@ -58,7 +59,9 @@ except:
 from gluon import *
 from gluon.storage import Storage
 from gluon.tools import fetch
+
 from ..s3 import *
+from s3layouts import S3PopupLink
 
 # =============================================================================
 def get_cap_options():
@@ -438,8 +441,8 @@ $.filterOptionsS3({
                      Field("msg_type",
                            label = T("Message Type"),
                            default = "Alert",
-                           represent = S3Represent(options = cap_options["cap_alert_msg_type_code_opts"],
-                                                   ),
+                           #represent = S3Represent(options = cap_options["cap_alert_msg_type_code_opts"],
+                           #                        ),
                            requires = IS_IN_SET(cap_options["cap_alert_msg_type_code_opts"]),
                            comment = DIV(_class="tooltip",
                                          _title="%s|%s" % (T("The nature of the alert message"),
@@ -499,7 +502,9 @@ $.filterOptionsS3({
                                          _title="%s|%s" % (T("The text describing the purpose or significance of the alert message"),
                                                            T("The message note is primarily intended for use with status 'Exercise' and message type 'Error'"))),
                            ),
-                     Field("reference", #"list:reference cap_alert",
+                     # text data type because as the number of referenced alert
+                     # goes on increasing, it could very easily be more than 512 chars
+                     Field("reference", "text",
                            label = T("Reference"),
                            writable = False,
                            readable = False,
@@ -1198,8 +1203,6 @@ T("Upload an image file(bmp, gif, jpeg or png), max. 800x800 pixels!"))),
                      Field("uri",
                            label = T("Link to any resources"),
                            requires = IS_EMPTY_OR(IS_URL()),
-                           readable = False,
-                           writable = False,
                            comment = DIV(_class="tooltip",
                                          _title="%s|%s" % (T("The identifier of the hyperlink for the resource file"),
                                                            T("A full absolute URI, typically a Uniform Resource Locator that can be used to retrieve the resource over the Internet."))),
@@ -1239,6 +1242,7 @@ T("Upload an image file(bmp, gif, jpeg or png), max. 800x800 pixels!"))),
                                     "info_id",
                                     "is_template",
                                     "resource_desc",
+                                    "uri",
                                     "image",
                                     "mime_type",
                                     "size",
@@ -1260,6 +1264,7 @@ T("Upload an image file(bmp, gif, jpeg or png), max. 800x800 pixels!"))),
                                     )
 
         list_fields = ["resource_desc",
+                       "uri",
                        "image",
                        "document.file",
                        ]
@@ -1755,9 +1760,15 @@ T("Upload an image file(bmp, gif, jpeg or png), max. 800x800 pixels!"))),
                 form.errors["scope"] = \
                     current.T("'Scope' field is mandatory for actual alerts!")
 
-            if form_vars_get("scope") == "Private" and not form_vars_get("addresses"):
-                form.errors["addresses"] = \
-                    current.T("'Recipients' field mandatory in case of 'Private' scope")
+            if form_vars_get("scope") == "Private":
+                # Check if this comes from cap_alert
+                # Can also come from rss import
+                request = current.request
+                if request.controller == "cap" and request.function == "alert":
+                    # Internal alerts
+                    if not form_vars_get("addresses"):
+                        form.errors["addresses"] = \
+                            current.T("'Recipients' field mandatory in case of 'Private' scope")
 
             if form_vars_get("scope") == "Restricted" and not form_vars_get("restriction"):
                 form.errors["restriction"] = \
@@ -1989,7 +2000,7 @@ current.T("This combination of the 'Event Type', 'Urgency', 'Certainty' and 'Sev
                                                limitby=(0, 1)).first()
         alert_id = irow.alert_id
         if alert_id:
-            db(db.cap_info_parameter.id == form_vars.id).update(alert_id = alert_id)
+            db(db.cap_info_parameter.id == form_vars["id"]).update(alert_id = alert_id)
 
     # -------------------------------------------------------------------------
     @staticmethod
@@ -2105,7 +2116,7 @@ current.T("This combination of the 'Event Type', 'Urgency', 'Certainty' and 'Sev
         if alert_id:
             # This is not template area
             # NB Template area are not linked with alert_id
-            db(db.cap_area_location.id == form_vars.id).update(alert_id = alert_id)
+            db(db.cap_area_location.id == form_vars["id"]).update(alert_id = alert_id)
 
     # -------------------------------------------------------------------------
     @staticmethod
@@ -2416,7 +2427,7 @@ class S3CAPHistoryModel(S3Model):
                                          _title="%s|%s" % (T("The text describing the purpose or significance of the alert message"),
                                                            T("The message note is primarily intended for use with status 'Exercise' and message type 'Error'"))),
                            ),
-                     Field("reference",
+                     Field("reference", "text",
                            label = T("Reference"),
                            readable = False,
                            comment = DIV(_class="tooltip",
@@ -3009,6 +3020,7 @@ T("Upload an image file(bmp, gif, jpeg or png), max. 800x800 pixels!"))),
 
         crud_form = S3SQLCustomForm("alert_history_id",
                                     "resource_desc",
+                                    "uri",
                                     "image",
                                     "mime_type",
                                     "size",
@@ -3037,6 +3049,148 @@ T("Upload an image file(bmp, gif, jpeg or png), max. 800x800 pixels!"))),
         except IndexError:
             return current.messages.UNKNOWN_OPT
         return ""
+
+# =============================================================================
+class S3CAPAlertingAuthorityModel(S3Model):
+
+    names = ("cap_alerting_authority",
+             "cap_authority_feed_url",
+             "cap_authority_forecast_url"
+             )
+
+    def model(self):
+
+        T = current.T
+        define_table = self.define_table
+        messages = current.messages
+
+        # ---------------------------------------------------------------------
+        # The data model resembles the data extracted from here http://alerting.worldweather.org/
+        #
+        tablename = "cap_alerting_authority"
+        define_table(tablename,
+                     Field("oid", unique=True,
+                           label = T("CAP OID"),
+                           requires = IS_MATCH('^[^,<&\s]+$',
+                                               error_message=T("Cannot be empty and Must not include spaces, commas, or restricted characters (< and &).")),
+                           ),
+                     self.org_organisation_id(
+                           requires = self.org_organisation_requires(
+                                                required=True,
+                                                ),
+                           widget = None,
+                           comment = S3PopupLink(c = "org",
+                                                 f = "organisation",
+                                                 label = T("Create Organization"),
+                                                 title = messages.ORGANISATION,
+                                                 ),
+                          ),
+                     Field("country", length=2,
+                           label = T("Country"),
+                           represent = self.gis_country_code_represent,
+                           requires = IS_EMPTY_OR(IS_IN_SET_LAZY(
+                                                    lambda: current.gis.get_countries(key_type="code"),
+                                                    zero=messages.SELECT_LOCATION)),
+                           ),
+                     Field("authorisation", "text",
+                           label = T("Authorization Basis"),
+                           readable = False,
+                           writable = False,
+                           ),
+                     s3_comments(),
+                     *s3_meta_fields())
+
+        # CRUD Strings
+        self.crud_strings[tablename] = Storage(
+                    label_create = T("Add Alerting Authority"),
+                    title_display = T("Alerting Authority"),
+                    title_list = T("Alerting Authorities"),
+                    title_update = T("Edit Alerting Authority"),
+                    subtitle_list = T("List Alerting Authorities"),
+                    label_list_button = T("List Alerting Authorities"),
+                    label_delete_button = T("Delete Alerting Authority"),
+                    msg_record_created = T("Alerting Authority added"),
+                    msg_record_modified = T("Alerting Authority updated"),
+                    msg_record_deleted = T("Alerting Authority deleted"),
+                    msg_list_empty = T("No Alerting Authority available"))
+
+        list_fields = ["oid",
+                       "organisation_id",
+                       "country",
+                       "feed_url.url",
+                       "forecast_url.url",
+                       ]
+
+        alerting_authority_represent = S3Represent(lookup = tablename,
+                                                   fields = ["organisation_id", "oid"],
+                                                   field_sep = " - ")
+
+        alerting_authority_id = S3ReusableField("alerting_authority_id", "reference %s" % tablename,
+                                                label = T("CAP Alerting Authority"),
+                                                ondelete = "CASCADE",
+                                                represent = alerting_authority_represent,
+                                                requires = IS_EMPTY_OR(
+                                                    IS_ONE_OF(db, "cap_alerting_authority.id",
+                                                              alerting_authority_represent)
+                                                ))
+
+        crud_form = S3SQLCustomForm("oid",
+                                    "organisation_id",
+                                    "country",
+                                    "authorisation",
+                                    S3SQLInlineComponent("feed_url",
+                                                         name = "feed_url",
+                                                         label = T("CAP Feed URL"),
+                                                         fields = [("", "url")],
+                                                         ),
+                                    S3SQLInlineComponent("forecast_url",
+                                                         name = "forecast_url",
+                                                         label = T("Forecast URL"),
+                                                         fields = [("", "url")],
+                                                         )
+                                    )
+
+        self.configure(tablename,
+                       crud_form = crud_form,
+                       list_fields = list_fields,
+                       )
+
+        # Components
+        self.add_components(tablename,
+                            cap_authority_feed_url = {"name": "feed_url",
+                                                      "joinby": "alerting_authority_id",
+                                                      },
+                            cap_authority_forecast_url = {"name": "forecast_url",
+                                                          "joinby": "alerting_authority_id",
+                                                          },
+                            )
+
+        # ---------------------------------------------------------------------
+        # Feed URL for CAP Alerting Authority
+        tablename = "cap_authority_feed_url"
+        define_table(tablename,
+                     alerting_authority_id(),
+                     # @ToDo: Add username and pwd for url
+                     Field("url",
+                           label = T("CAP Feed URL"),
+                           requires = IS_EMPTY_OR(IS_URL()),
+                           ),
+                     *s3_meta_fields())
+
+        # ---------------------------------------------------------------------
+        # Forecasts URL for CAP Alerting Authority
+        tablename = "cap_authority_forecast_url"
+        define_table(tablename,
+                     alerting_authority_id(),
+                     Field("url",
+                           label = T("Forecast URL"),
+                           requires = IS_EMPTY_OR(IS_URL()),
+                           ),
+                     *s3_meta_fields())
+
+        # ---------------------------------------------------------------------
+        # Pass names back to global scope (s3.*)
+        return {}
 
 # =============================================================================
 class S3CAPAreaNameModel(S3Model):
@@ -3212,10 +3366,10 @@ def cap_rheader(r):
                                                 select(area_table.id,
                                                        limitby=(0, 1)).first()
                             if area_row and has_permission("update", "cap_alert",
-                                                           record_id=record.id):
+                                                           record_id=alert_id):
                                 action_btn = A(T("Submit for Approval"),
                                                _href = URL(f = "notify_approver",
-                                                           vars = {"cap_alert.id": record.id,
+                                                           vars = {"cap_alert.id": alert_id,
                                                                    },
                                                            ),
                                                _class = "action-btn confirm-btn button tiny"
@@ -3226,7 +3380,7 @@ def cap_rheader(r):
                                 # For Alert Approver
                                 if has_permission("approve", "cap_alert"):
                                     action_btn = A(T("Review Alert"),
-                                                   _href = URL(args = [record.id,
+                                                   _href = URL(args = [alert_id,
                                                                        "review"
                                                                        ],
                                                                ),
@@ -3727,6 +3881,7 @@ def cap_alert_list_layout(list_id, item_id, resource, rfields, record):
     status = record["cap_alert.status"]
     scope = record["cap_alert.scope"]
     event = record["cap_info.event_type_id"]
+    msg_type = s3_str(record["cap_alert.msg_type"])
 
     if current.auth.s3_logged_in():
         _href = URL(c="cap", f="alert", args=[record_id, "profile"])
@@ -3751,7 +3906,7 @@ def cap_alert_list_layout(list_id, item_id, resource, rfields, record):
         # Map popup
         event = itable.event_type_id.represent(event)
         if priority is None:
-            priority = T("Unknown")
+            priority = ""
         else:
             priority = itable.priority.represent(priority)
         description = record["cap_info.description"]
@@ -3790,13 +3945,13 @@ def cap_alert_list_layout(list_id, item_id, resource, rfields, record):
                    )
     else:
         if priority == current.messages["NONE"]:
-            priority = T("Unknown")
+            priority = ""
         sender_name = record["cap_info.sender_name"]
         sent = record["cap_alert.sent"]
 
         headline = "%s" % (headline)
 
-        sub_heading = "%s %s" % (priority, event)
+        sub_heading = "%s %s %s" % (priority, event, msg_type)
 
         sub_headline = A(sub_heading,
                          _href = _href,
@@ -3911,6 +4066,11 @@ class CAPImportFeed(S3Method):
             @param r: the S3Request
             @param attr: controller options for this request
         """
+
+        # Requires permission to create the alert
+        authorised = current.auth.s3_has_permission("create", "cap_alert")
+        if not authorised:
+            r.unauthorised()
 
         if r.representation == "html":
 
@@ -4279,7 +4439,7 @@ class cap_CloneAlert(S3Method):
             r.error(405, current.ERROR.BAD_METHOD)
         return output
 
-# -------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 def clone(r, record=None, **attr):
     """
         Clone the cap_alert
@@ -4606,6 +4766,7 @@ def clone(r, record=None, **attr):
             update_super = s3db.update_super
             for resource_row in resource_rows:
                 resource_row_clone = resource_row.as_dict()
+                mime_type = resource_row_clone["mime_type"]
                 if record:
                     # History Table use-case
                     resource_row_clone["alert_history_id"] = new_alert_id
@@ -4614,7 +4775,7 @@ def clone(r, record=None, **attr):
                     # Post-process create
                     audit("create", "cap", "resource_history", record=rid)
                     set_record_owner(resource_history_table, rid)
-                else:
+                elif mime_type and mime_type != "cap":
                     # Update/Error/Relay/All Clear use-case
                     resource_row_clone["alert_id"] = new_alert_id
                     rid = resource_table_insert(**resource_row_clone)
@@ -4783,7 +4944,7 @@ class cap_AlertProfileWidget(object):
             @param strong: whether to display with strong color
             @param hide_empty: whether to hide empty records
             @param headline: is headline?
-            @param resource_segment: beongs to resource segment
+            @param resource_segment: belongs to resource segment?
         """
 
         if not value and hide_empty:
@@ -4793,10 +4954,13 @@ class cap_AlertProfileWidget(object):
                 nvalue = []
                 for value_ in value:
                     if value_:
-                        if represent:
+                        if resource_segment and represent:
                             nvalue.append(represent(value_))
-                        else:
-                            nvalue.append(value_)
+                        elif not resource_segment:
+                            if represent:
+                                nvalue.append(s3_str(represent(value_)))
+                            else:
+                                nvalue.append(s3_str(value_))
                 if not resource_segment:
                     if len(nvalue):
                         nvalue = ", ".join(nvalue)

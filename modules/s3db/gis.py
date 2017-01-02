@@ -134,7 +134,7 @@ class S3LocationModel(S3Model):
                   label = T("Name"),
                   # Placenames don't have to be unique.
                   # Waypoints don't need to have a name at all.
-                  #requires = IS_NOT_EMPTY()
+                  requires = IS_LENGTH(128),
                   ),
             Field("level", length=2,
                   label = T("Level"),
@@ -231,6 +231,7 @@ class S3LocationModel(S3Model):
             Field("addr_postcode", length=128,
                   label = settings.get_ui_label_postcode(),
                   represent = lambda v: v or NONE,
+                  requires = IS_LENGTH(128),
                   ),
             s3_date("start_date",
                     label = T("Start Date"),
@@ -272,7 +273,11 @@ class S3LocationModel(S3Model):
                   ),
             *meta_spatial_fields)
 
+        # Would be nice if this table could be Lazy but it probably can't
         table = db[tablename]
+        # Doesn't set parent properly when field is defined inline as the table isn't yet in db
+        table._create_references()
+
         # Default the owning role to Authenticated. This can be used to allow the site
         # to control whether authenticated users get to create / update locations, or
         # just read them. Having an owner and using ACLs also allows us to take away
@@ -553,7 +558,7 @@ class S3LocationModel(S3Model):
                     # id doesn't exist for create forms and parent is a quicker check anyway when available
                     child = parent or current.request.vars.get("id", None)
                     editable = gis_hierarchy_editable(level, child)
-                if not editable:
+                if not editable and not s3.synchronise_uuids: # Allow Editing of UUIDs during Sync
                     response.error = T("Sorry, only users with the MapAdmin role are allowed to edit these locations")
                     form.errors["level"] = T("This level is not open for editing.")
                     return
@@ -616,14 +621,15 @@ class S3LocationModel(S3Model):
                         # disabled. This is what propagates location and bounds
                         # down the hierarchy so the parent may not have bounds.
                         # Prepopulate data should be prepared to be correct.
-                        lat_min, lon_min, lat_max, lon_max, parent_name = gis.get_parent_bounds(parent=parent)
+                        lat_min, lon_min, lat_max, lon_max, parent_name = \
+                                        gis.get_parent_bounds(parent=parent)
                         if (lat > lat_max) or (lat < lat_min):
-                            lat_error =  "%s: %s & %s" % (T("Latitude should be between"),
-                                                          lat_min, lat_max)
+                            lat_error = T("Latitude %(lat)s is invalid, should be between %(lat_min)s & %(lat_max)s") % \
+                                dict(lat=lat, lat_min=lat_min, lat_max=lat_max)
                             form.errors["lat"] = lat_error
                         if (lon > lon_max) or (lon < lon_min):
-                            lon_error = "%s: %s & %s" % (T("Longitude should be between"),
-                                                         lon_min, lon_max)
+                            lon_error = T("Longitude %(lon)s is invalid, should be between %(lon_min)s & %(lon_max)s") % \
+                                dict(lon=lon, lon_min=lon_min, lon_max=lon_max)
                             form.errors["lon"] = lon_error
                         if form.errors:
                             if name:
@@ -666,8 +672,8 @@ class S3LocationModel(S3Model):
                                 error = T("Sorry location appears to be outside the area supported by this deployment.")
                             response.error = error
                             current.log.error(error)
-                            lat_error =  "%s: %s & %s" % (T("Latitude should be between"),
-                                                          str(lat_min), str(lat_max))
+                            lat_error =  T("Latitude %(lat)s is invalid, should be between %(lat_min)s & %(lat_max)s") % \
+                                dict(lat=lat, lat_min=lat_min, lat_max=lat_max)
                             form.errors["lat"] = lat_error
                             current.log.error(lat_error)
                             return
@@ -679,8 +685,8 @@ class S3LocationModel(S3Model):
                                 error = T("Sorry location appears to be outside the area supported by this deployment.")
                             response.error = error
                             current.log.error(error)
-                            lon_error = "%s: %s & %s" % (T("Longitude should be between"),
-                                                         str(lon_min), str(lon_max))
+                            lon_error = T("Longitude %(lon)s is invalid, should be between %(lon_min)s & %(lon_max)s") % \
+                                dict(lon=lon, lon_min=lon_min, lon_max=lon_max)
                             form.errors["lon"] = lon_error
                             current.log.error(lon_error)
                             return
@@ -820,7 +826,7 @@ class S3LocationModel(S3Model):
             # http://stackoverflow.com/questions/18507589/the-lower-function-on-international-characters-in-postgresql
             # Works fine on Debian servers if the locale is a .UTF-8 before the Postgres cluster is created
             query = (table.name.lower() == s3_unicode(name).lower().encode("utf8")) & \
-                (table.level == level)
+                    (table.level == level)
         else :
             query = (table.name.lower() == name.lower()) & \
                 (table.level == level)
@@ -944,7 +950,7 @@ class S3LocationModel(S3Model):
 
         # We want to do case-insensitive searches
         # (default anyway on MySQL/SQLite, but not PostgreSQL)
-        value = value.lower().strip()
+        value = s3_unicode(value).lower().strip()
 
         search_l10n = None
         translate = None
@@ -1642,7 +1648,9 @@ class S3GISConfigModel(S3Model):
         define_table(tablename,
                      Field("name", length=64, notnull=True, unique=True,
                            label = T("Name"),
-                           requires = IS_NOT_EMPTY(),
+                           requires = [IS_NOT_EMPTY(),
+                                       IS_LENGTH(64),
+                                       ]
                            ),
                      # If-needed, then Symbology should be here
                      #symbology_id(),
@@ -1736,7 +1744,9 @@ class S3GISConfigModel(S3Model):
         define_table(tablename,
                      Field("name", length=64, notnull=True, unique=True,
                            label = T("Name"),
-                           requires = IS_NOT_EMPTY(),
+                           requires = [IS_NOT_EMPTY(),
+                                       IS_LENGTH(64),
+                                       ],
                            ),
                      Field("epsg", "integer", notnull=True,
                            label = "EPSG",
@@ -1748,7 +1758,9 @@ class S3GISConfigModel(S3Model):
                                          _title="%s|%s" % (T("Maximum Extent"),
                                                            T("The Maximum valid bounds, in projected coordinates"))),
                            # @ToDo: Add a specialised validator
-                           requires = IS_NOT_EMPTY(),
+                           requires = [IS_NOT_EMPTY(),
+                                       IS_LENGTH(64),
+                                       ],
                            ),
                      Field("proj4js",
                            label = proj4js,
@@ -2573,6 +2585,7 @@ class S3LayerEntityModel(S3Model):
                            comment = DIV(_class="tooltip",
                                          _title="%s|%s" % (T("Folder"),
                                                            T("If you enter a foldername then the layer will appear in this folder in the Map's layer switcher. A sub-folder can be created by separating names with a '/'"))),
+                           requires = IS_LENGTH(64),
                            ),
                      Field("base", "boolean",
                            default = False,
@@ -3102,7 +3115,9 @@ class S3MapModel(S3Model):
         tablename = "gis_feature_query"
         define_table(tablename,
                      Field("name", length=128, notnull=True,
-                           requires = IS_NOT_EMPTY(),
+                           requires = [IS_NOT_EMPTY(),
+                                       IS_LENGTH(128),
+                                       ],
                            ),
                      Field("lat", "double",
                            requires = IS_LAT(),
@@ -3857,6 +3872,7 @@ class S3MapModel(S3Model):
                            comment = DIV(_class="tooltip",
                                          _title="%s|%s" % (T("Map"),
                                                            T("Optional selection of a MapServer map."))),
+                           requires = IS_LENGTH(32),
                            ),
                      Field("layers",
                            label = T("Layers"),
@@ -3885,6 +3901,7 @@ class S3MapModel(S3Model):
                            comment = DIV(_class="tooltip",
                                          _title="%s|%s" % (T("Style"),
                                                            T("Optional selection of an alternate style."))),
+                           requires = IS_LENGTH(32),
                            ),
                      Field("bgcolor", length=32,
                            label = T("Background Color"),
@@ -4007,7 +4024,9 @@ class S3MapModel(S3Model):
         tablename = "gis_cache2"
         define_table(tablename,
                      Field("name", length=128, notnull=True, unique=True,
-                           requires = IS_NOT_EMPTY(),
+                           requires = [IS_NOT_EMPTY(),
+                                       IS_LENGTH(128),
+                                       ],
                            ),
                      Field("file", "upload",
                            autodelete = True,
@@ -4899,7 +4918,9 @@ def name_field():
     return S3ReusableField("name", length=64, notnull=True,
                            #unique=True,
                            label = current.T("Name"),
-                           requires = IS_NOT_EMPTY(),
+                           requires = [IS_NOT_EMPTY(),
+                                       IS_LENGTH(64),
+                                       ],
                            )
 
 # =============================================================================
@@ -5384,7 +5405,12 @@ class gis_LocationRepresent(S3Represent):
                 htable = s3db.gis_hierarchy
                 L0_name = row.L0
                 if L0_name:
-                    path = row.path.split("/")
+                    if row.path:
+                        path = row.path
+                    else:
+                        # Not yet been built, so do it now
+                        path = current.gis.update_location_tree(row)
+                    path = path.split("/")
                     L0_id = path[0]
                     level_name = current.gis.get_location_hierarchy(level,
                                                                     L0_id)

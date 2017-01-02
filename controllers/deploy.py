@@ -147,6 +147,7 @@ def human_resource():
     """
 
     # Tweak settings for RDRT
+    # @ToDo: These should really be in customise_ in IFRC template
     settings.hrm.staff_experience = True
     settings.hrm.use_skills = True
     settings.search.filter_manager = True
@@ -158,7 +159,7 @@ def human_resource():
 
     # Filter to just Deployables
     q = FS("application.active") != None
-    output = s3db.hrm_human_resource_controller(extra_filter=q)
+    output = s3db.hrm_human_resource_controller(extra_filter = q)
     return output
 
 # -----------------------------------------------------------------------------
@@ -254,8 +255,7 @@ def group():
         return True
     s3.prep = prep
 
-    return s3_rest_controller("pr", "group",
-                              )
+    return s3_rest_controller("pr", "group")
 
 # -----------------------------------------------------------------------------
 def application():
@@ -954,7 +954,10 @@ def twitter_channel():
         return output
     s3.postp = postp
 
-    return s3_rest_controller("msg", deduplicate="", list_btn="")
+    return s3_rest_controller("msg",
+                              deduplicate = "",
+                              list_btn = "",
+                              )
 
 # -----------------------------------------------------------------------------
 def alert_recipient():

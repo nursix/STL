@@ -49,40 +49,37 @@ class OutreachAreaModel(S3Model):
     def model(self):
 
         T = current.T
-        db = current.db
         auth = current.auth
 
-        define_table = self.define_table
         super_link = self.super_link
 
-        s3 = current.response.s3
-        crud_strings = s3.crud_strings
-
-        root_org = auth.root_org()
-        ADMIN = current.session.s3.system_roles.ADMIN
-        is_admin = auth.s3_has_role(ADMIN)
+        #root_org = auth.root_org()
+        #ADMIN = current.session.s3.system_roles.ADMIN
+        #is_admin = auth.s3_has_role(ADMIN)
 
         # ---------------------------------------------------------------------
         # Area
         #
         tablename = "po_area"
-        define_table(tablename,
+        self.define_table(tablename,
                      super_link("doc_id", "doc_entity"),
-                     super_link("pe_id", "pr_pentity"),
+                     # This was included to allow Areas to be realm entities but this is currently not used
+                     # Re-enable onaccept/ondelete & S3EntityRoleManager if this becomes required in future
+                     #super_link("pe_id", "pr_pentity"),
                      Field("name",
                            requires = IS_NOT_EMPTY(),
                            ),
-                     # @todo: link demographics?
                      self.gis_location_id(
                         widget = S3LocationSelector(points = False,
                                                     polygons = True,
                                                     feature_required = True,
                                                     ),
                      ),
-                     # Only included to set realm entity:
-                     self.org_organisation_id(default = root_org,
-                                              readable = is_admin,
-                                              writable = is_admin,
+                     # Included primarily to set realm
+                     self.org_organisation_id(default = auth.user and auth.user.organisation_id,
+                                              #default = root_org,
+                                              #readable = is_admin,
+                                              #writable = is_admin,
                                               ),
                      Field("attempted_visits", "integer",
                            comment = DIV(_class="tooltip",
@@ -96,7 +93,7 @@ class OutreachAreaModel(S3Model):
                      *s3_meta_fields())
 
         # CRUD Strings
-        crud_strings[tablename] = Storage(
+        current.response.s3.crud_strings[tablename] = Storage(
             label_create = T("Create Area"),
             title_display = T("Area Details"),
             title_list = T("Areas"),
@@ -114,7 +111,7 @@ class OutreachAreaModel(S3Model):
         area_id = S3ReusableField("area_id", "reference %s" % tablename,
                                   label = T("Area"),
                                   represent = represent,
-                                  requires = IS_ONE_OF(db, "po_area.id",
+                                  requires = IS_ONE_OF(current.db, "po_area.id",
                                                        represent,
                                                        ),
                                   sortby = "name",
@@ -146,8 +143,10 @@ class OutreachAreaModel(S3Model):
         self.configure(tablename,
                        deduplicate = S3Duplicate(ignore_deleted=True),
                        filter_widgets = filter_widgets,
-                       onaccept = self.area_onaccept,
-                       ondelete = self.area_ondelete,
+                       #onaccept = self.area_onaccept,
+                       #ondelete = self.area_ondelete,
+                       realm_components = ("household",
+                                           ),
                        summary = ({"common": True,
                                    "name": "add",
                                    "widgets": [{"method": "create"}],
@@ -162,7 +161,8 @@ class OutreachAreaModel(S3Model):
                                                 "ajax_init": True}],
                                    },
                                   ),
-                       super_entity = ("doc_entity", "pr_pentity"),
+                       #super_entity = ("doc_entity", "pr_pentity"),
+                       super_entity = "doc_entity",
                        )
 
         # ---------------------------------------------------------------------
@@ -289,7 +289,8 @@ class OutreachHouseholdModel(S3Model):
 
         s3 = current.response.s3
         crud_strings = s3.crud_strings
-        settings = current.deployment_settings
+
+        person_id = self.pr_person_id
 
         # ---------------------------------------------------------------------
         # Household
@@ -299,12 +300,13 @@ class OutreachHouseholdModel(S3Model):
                      super_link("doc_id", "doc_entity"),
                      super_link("pe_id", "pr_pentity"),
                      self.po_area_id(),
-                     # @todo: inherit Lx from area and hide Lx (in area prep)
+                     # Controller (area prep) makes it inherit Lx from area
                      self.gis_location_id(
                         label = T("Address"),
                         widget = S3LocationSelector(show_address=True,
-                                                    show_map=settings.get_gis_map_selector(),
-                                                    show_postcode=settings.get_gis_postcode_selector(),
+                                                    # Defaults:
+                                                    #show_map=settings.get_gis_map_selector(),
+                                                    #show_postcode=settings.get_gis_postcode_selector(),
                                                     prevent_duplicate_addresses = True,
                                                     ),
                         ),
@@ -432,6 +434,12 @@ class OutreachHouseholdModel(S3Model):
                   filter_widgets = filter_widgets,
                   list_fields = list_fields,
                   onaccept = self.household_onaccept,
+                  realm_components = ("pr_person",
+                                      "household_dwelling",
+                                      "household_social",
+                                      "household_followup",
+                                      "organisation_household",
+                                      ),
                   report_options = {"rows": report_axes,
                                     "cols": report_axes,
                                     "fact": reports,
@@ -469,7 +477,7 @@ class OutreachHouseholdModel(S3Model):
         tablename = "po_household_member"
         define_table(tablename,
                      household_id(),
-                     self.pr_person_id(),
+                     person_id(),
                      s3_comments(),
                      *s3_meta_fields())
 
@@ -479,7 +487,7 @@ class OutreachHouseholdModel(S3Model):
         age_groups = ("<18", "18-30", "30-55", "56-75", "75+")
         tablename = "po_age_group"
         define_table(tablename,
-                     self.pr_person_id(),
+                     person_id(),
                      Field("age_group",
                            label = T("Age Group"),
                            requires = IS_EMPTY_OR(IS_IN_SET(age_groups)),
@@ -711,7 +719,6 @@ class OutreachReferralModel(S3Model):
     def model(self):
 
         T = current.T
-        db = current.db
 
         define_table = self.define_table
         configure = self.configure
@@ -741,8 +748,8 @@ class OutreachReferralModel(S3Model):
         #
         tablename = "po_referral_organisation"
         define_table(tablename,
-                     organisation_id(represent=org_represent,
-                                     comment=org_comment,
+                     organisation_id(represent = org_represent,
+                                     comment = org_comment,
                                      ),
                      #s3_comments(),
                      *s3_meta_fields())
@@ -757,9 +764,9 @@ class OutreachReferralModel(S3Model):
         tablename = "po_organisation_area"
         define_table(tablename,
                      # @todo: AddResourceLink should go to po/organisation
-                     organisation_id(label=T("Agency"),
-                                     represent=org_represent,
-                                     comment=org_comment,
+                     organisation_id(label = T("Agency"),
+                                     represent = org_represent,
+                                     comment = org_comment,
                                      ),
                      self.po_area_id(),
                      s3_comments(),
@@ -774,18 +781,18 @@ class OutreachReferralModel(S3Model):
         )
 
         # ---------------------------------------------------------------------
-        # Referral Household=>Agency
+        # Referral Household => Agency
         #
         tablename = "po_organisation_household"
         define_table(tablename,
                      # @todo: AddResourceLink should go to po/organisation
-                     organisation_id(label=T("Referral Agency"),
-                                     represent=org_represent,
-                                     comment=org_comment,
+                     organisation_id(label = T("Referral Agency"),
+                                     represent = org_represent,
+                                     comment = org_comment,
                                      ),
                      self.po_household_id(),
-                     s3_date(default="now",
-                             label=T("Date Referral Made"),
+                     s3_date(default = "now",
+                             label =T("Date Referral Made"),
                              ),
                      s3_comments(),
                      *s3_meta_fields())
@@ -840,7 +847,6 @@ class po_HouseholdRepresent(S3Represent):
             @param fields: unused (retained for API compatibility)
         """
 
-        s3db = current.s3db
         table = self.table
 
         count = len(values)
@@ -938,23 +944,44 @@ def po_rheader(r, tabs=[]):
 # =============================================================================
 def po_organisation_onaccept(form):
     """
-        Create a po_referral_organisation record onaccept of
-        an org_organisation to link it to this module.
-
+        1. Set the owned_by_group to PO_ADMIN so that they can see these
+           agencies in the household referrals dropdown
+        2. Create a po_referral_organisation record onaccept of
+           an org_organisation to link it to this module.
         @param form: the form
     """
 
-    formvars = form.vars
     try:
-        organisation_id = formvars.id
+        organisation_id = form.vars["id"]
     except AttributeError:
         return
 
-    rtable = current.s3db.po_referral_organisation
+    db = current.db
+    s3db = current.s3db
+    otable = s3db.org_organisation
+    record = db(otable.id == organisation_id).select(otable.id,
+                                                     otable.owned_by_group,
+                                                     limitby=(0, 1)
+                                                     ).first()
+    if record:
+        gtable = db.auth_group
+        role = db(gtable.uuid == "PO_AGENCIES").select(gtable.id,
+                                                       limitby = (0, 1)
+                                                       ).first()
+        try:
+            PO_AGENCIES = role.id
+        except AttributeError:
+            # No PO_AGENCIES role prepopped
+            pass
+        else:
+            if record.owned_by_group != PO_AGENCIES:
+                record.update_record(owned_by_group = PO_AGENCIES)
+
+    rtable = s3db.po_referral_organisation
     query = (rtable.organisation_id == organisation_id) & \
             (rtable.deleted != True)
-    row = current.db(query).select(rtable.id, limitby=(0, 1)).first()
-    if not row:
+    exists = db(query).select(rtable.id, limitby=(0, 1)).first()
+    if not exists:
         rtable.insert(organisation_id=organisation_id)
 
 # =============================================================================

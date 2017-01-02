@@ -50,7 +50,7 @@ from gluon.validators import Validator
 
 from s3query import FS
 from s3utils import s3_debug, s3_mark_required, s3_represent_value, s3_store_last_record_id, s3_strip_markup, s3_unicode, s3_validate
-from s3widgets import S3Selector
+from s3widgets import S3Selector, S3UploadWidget
 
 # Compact JSON encoding
 SEPARATORS = (",", ":")
@@ -356,13 +356,14 @@ class S3SQLDefaultForm(S3SQLForm):
         self.record_id = record_id
 
         if not readonly:
+            _get = options.get
 
             # Pre-populate create-form?
             if record_id is None:
-                data = options.get("data", None)
-                from_table = options.get("from_table", None)
-                from_record = options.get("from_record", None)
-                map_fields = options.get("map_fields", None)
+                data = _get("data", None)
+                from_table = _get("from_table", None)
+                from_record = _get("from_record", None)
+                map_fields = _get("map_fields", None)
                 record = self.prepopulate(from_table=from_table,
                                           from_record=from_record,
                                           map_fields=map_fields,
@@ -428,7 +429,6 @@ class S3SQLDefaultForm(S3SQLForm):
         # Process the form
         logged = False
         if not readonly:
-            _get = options.get
             link = _get("link")
             hierarchy = _get("hierarchy")
             onvalidation = _get("onvalidation")
@@ -1206,21 +1206,16 @@ class S3SQLCustomForm(S3SQLForm):
                 subdata[component.fkey] = main_data[pkey]
 
             # Do we already have a record for this component?
-            # If yes, then get the subrecord ID
             rows = self.subrows
             if alias in rows and rows[alias] is not None:
+                # Yes => get the subrecord ID
                 subid = rows[alias][subtable._id]
             else:
+                # No => apply component defaults
                 subid = None
-                # Apply component defaults
-                defaults = component.defaults
-                if isinstance(defaults, dict):
-                    for k, v in defaults.items():
-                        if k != component.fkey and \
-                           k not in subdata and \
-                           k in component.fields:
-                            subdata[k] = v
-
+                subdata = component.get_defaults(main_data,
+                                                 data = subdata,
+                                                 )
             # Accept the subrecord
             self._accept(subid,
                          subdata,
@@ -1314,7 +1309,13 @@ class S3SQLCustomForm(S3SQLForm):
         table = component.table
         tablename = component.tablename
         if component._alias != tablename:
-            table = s3db.table(component.tablename)
+            unaliased = s3db.table(component.tablename)
+            # Must retain custom defaults of the aliased component:
+            for field in table:
+                field_ = unaliased[field.name]
+                field_.default = field.default
+                field_.update = field.update
+            table = unaliased
 
         get_config = s3db.get_config
 
@@ -1621,7 +1622,11 @@ class S3SQLField(S3SQLFormElement):
             widget = options.get("widget", DEFAULT)
 
             # Field in the main table
-            if tname == resource.tablename:
+            if resource._alias:
+                tablename = resource._alias
+            else:
+                tablename = resource.tablename
+            if tname == tablename:
                 field = rfield.field
 
                 if label is not DEFAULT:
@@ -1668,6 +1673,7 @@ class S3SQLSubForm(S3SQLFormElement):
 
             @param resource: the resource the record belongs to
             @param record_id: the record ID
+
             @return: the value for the input field that corresponds
                       to the specified record.
         """
@@ -2193,6 +2199,7 @@ class S3SQLInlineComponent(S3SQLSubForm):
 
             @param resource: the resource the record belongs to
             @param record_id: the record ID
+
             @return: the JSON for the input field.
         """
 
@@ -2263,12 +2270,13 @@ class S3SQLInlineComponent(S3SQLSubForm):
                 start = 0
                 limit = 1 if options.multiple is False else None
                 data = component.select(all_fields,
-                                        start=start,
-                                        limit=limit,
-                                        represent=True,
-                                        raw_data=True,
-                                        show_links=False,
-                                        orderby=orderby)
+                                        start = start,
+                                        limit = limit,
+                                        represent = True,
+                                        raw_data = True,
+                                        show_links = False,
+                                        orderby = orderby,
+                                        )
 
                 records = data["rows"]
                 rfields = data["rfields"]
@@ -2335,9 +2343,14 @@ class S3SQLInlineComponent(S3SQLSubForm):
                     else:
                         # Virtual Field
                         value = row[colname]
+
                     text = s3_unicode(record[colname])
-                    if "<" in text:
-                        text = s3_strip_markup(text)
+                    # Text representation is only used in read-forms where
+                    # representation markup cannot interfere with the inline
+                    # form logic - so stripping the markup should not be
+                    # necessary here:
+                    #if "<" in text:
+                    #    text = s3_strip_markup(text)
 
                     item[fname] = {"value": value, "text": text}
 
@@ -2742,7 +2755,7 @@ class S3SQLInlineComponent(S3SQLSubForm):
             auth = current.auth
 
             # Process each item
-            has_permission = current.auth.s3_has_permission
+            has_permission = auth.s3_has_permission
             audit = current.audit
             onaccept = s3db.onaccept
 
@@ -2863,7 +2876,8 @@ class S3SQLInlineComponent(S3SQLSubForm):
                     mastertable = resource.table
                     if pkey != mastertable._id.name:
                         query = (mastertable._id == master_id)
-                        master = db(query).select(mastertable[pkey],
+                        master = db(query).select(mastertable._id,
+                                                  mastertable[pkey],
                                                   limitby=(0, 1)).first()
                         if not master:
                             return
@@ -2871,38 +2885,48 @@ class S3SQLInlineComponent(S3SQLSubForm):
                         master = Storage({pkey: master_id})
 
                     # Apply component defaults
-                    component_defaults = component.defaults
-                    if isinstance(component_defaults, dict):
-                        for k, v in component_defaults.items():
-                            if k != component.fkey and \
-                               k not in values and \
-                               k in component.fields:
-                                values[k] = v
+                    values = component.get_defaults(master,
+                                                    defaults = defaults,
+                                                    data = values,
+                                                    )
 
                     if not actuate_link or not link:
                         # Add master record ID as linked directly
                         values[component.fkey] = master[pkey]
                     else:
-                        # Check whether the component is a link table and we're linking to that via something like pr_person from hrm_human_resource
+                        # Check whether the component is a link table and
+                        # we're linking to that via something like pr_person
+                        # from hrm_human_resource
                         fkey = component.fkey
                         if fkey != "id" and fkey in component.fields and fkey not in values:
                             if fkey == "pe_id" and pkey == "person_id":
-                                # Need to lookup the pe_id manually (bad that we need this special case, must be a better way but this works for now)
+                                # Need to lookup the pe_id manually (bad that we need this
+                                # special case, must be a better way but this works for now)
                                 ptable = s3db.pr_person
-                                person = db(ptable.id == master[pkey]).select(ptable.pe_id,
-                                                                              limitby=(0, 1)
-                                                                              ).first()
+                                query = (ptable.id == master[pkey])
+                                person = db(query).select(ptable.pe_id,
+                                                          limitby=(0, 1)
+                                                          ).first()
                                 if person:
                                     values["pe_id"] = person.pe_id
                                 else:
                                     s3_debug("S3Forms", "Cannot find person with ID: %s" % master[pkey])
+                            elif resource.tablename == "pr_person" and \
+                                 fkey == "case_id" and pkey == "id":
+                                # Using dvr_case as a link between pr_person & e.g. project_activity
+                                # @ToDo: Work out generalisation & move to option if-possible
+                                ltable = component.link.table
+                                query = (ltable.person_id == master[pkey])
+                                link_record = db(query).select(ltable.id,
+                                                               limitby=(0, 1)
+                                                               ).first()
+                                if link_record:
+                                    values[fkey] = link_record[pkey]
+                                else:
+                                    s3_debug("S3Forms", "Cannot find case for person ID: %s" % master[pkey])
+
                             else:
                                 values[fkey] = master[pkey]
-
-                    # Apply defaults
-                    for f, v in defaults.iteritems():
-                        if f not in item:
-                            values[f] = v
 
                     # Create the new record
                     # use _table in case we are using an alias
@@ -3019,6 +3043,10 @@ class S3SQLInlineComponent(S3SQLSubForm):
             # Custom label and widget
             label = f.get("label", DEFAULT)
             widget = widgets.get(fname, DEFAULT)
+
+            # Use S3UploadWidget for upload fields
+            if widget is DEFAULT and str(table[fname].type) == "upload":
+                widget = S3UploadWidget.widget
 
             # Get a Field instance for SQLFORM.factory
             formfield = self._rename_field(table[fname],
@@ -3736,6 +3764,7 @@ class S3SQLInlineComponentCheckbox(S3SQLInlineComponent):
 
             @param resource: the resource the record belongs to
             @param record_id: the record ID
+
             @return: the JSON for the input field.
         """
 

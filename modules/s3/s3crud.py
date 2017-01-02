@@ -52,7 +52,7 @@ from s3datetime import S3DateTime
 from s3export import S3Exporter
 from s3forms import S3SQLDefaultForm
 from s3rest import S3Method
-from s3utils import s3_unicode, s3_validate, s3_represent_value, s3_set_extension
+from s3utils import s3_str, s3_unicode, s3_validate, s3_represent_value, s3_set_extension
 from s3widgets import S3EmbeddedComponentWidget, S3Selector, ICON
 
 # Compact JSON encoding
@@ -244,24 +244,44 @@ class S3CRUD(S3Method):
                 if buttons:
                     output["buttons"] = buttons
 
-            # Component join
+            # Component defaults and linking
             link = None
             if r.component:
+
+                defaults = r.component.get_defaults(r.record)
+
                 if resource.link is None:
-                    # No link table - direct component
+                    # Apply component defaults
+                    linked = resource.linked
+                    ctable = linked.table if linked else table
+                    for (k, v) in defaults.items():
+                        ctable[k].default = v
+
+                    # Configure post-process for S3EmbeddedComponentWidget
                     link = self._embed_component(resource, record=r.id)
+
+                    # Set default value for parent key (fkey)
                     pkey = resource.pkey
                     fkey = resource.fkey
                     field = table[fkey]
                     value = r.record[pkey]
-                    field.comment = None
-                    field.default = value
-                    field.update = value
+                    field.default = field.update = value
+
+                    # Add parent key to POST vars so that callbacks can see it
                     if r.http == "POST":
                         r.post_vars.update({fkey: value})
+
+                    # Hide the parent link in component forms
+                    field.comment = None
                     field.readable = False
                     field.writable = False
+
                 else:
+                    # Apply component defaults
+                    for (k, v) in defaults.items():
+                        table[k].default = v
+
+                    # Configure post-process to add a link table entry
                     link = Storage(resource=resource.link, master=r.record)
 
             get_vars = r.get_vars
@@ -387,7 +407,14 @@ class S3CRUD(S3Method):
                 elif r.http == "POST" and "save_close" in r.post_vars:
                     create_next = _config("create_next_close")
                 elif session.s3.rapid_data_entry and not r.component:
+                    if "w" in r.get_vars:
+                        # Don't redirect to form tab from summary page
+                        w = r.get_vars.pop("w")
+                    else:
+                        w = None
                     create_next = r.url()
+                    if w:
+                        r.get_vars["w"] = w
                 else:
                     create_next = _config("create_next")
 
@@ -1841,7 +1868,7 @@ class S3CRUD(S3Method):
                                     dt_pageLength=display_length,
                                     dt_dom = dt_dom,
                                     )
-                s3.actions = [{"label": str(current.T("Review")),
+                s3.actions = [{"label": s3_str(current.T("Review")),
                                "url": r.url(id="[id]", method="review"),
                                "_class": "action-btn"}]
 
@@ -2460,7 +2487,7 @@ class S3CRUD(S3Method):
         """
 
         link = dict(attr)
-        link["label"] = str(label) #s3_unicode(label).encode("utf8")
+        link["label"] = s3_str(label)
         link["url"] = url
         if icon and current.deployment_settings.get_ui_use_button_icons():
             link["icon"] = ICON.css_class(icon)
@@ -2474,8 +2501,9 @@ class S3CRUD(S3Method):
             s3.actions.append(link)
 
     # -------------------------------------------------------------------------
-    @staticmethod
-    def action_buttons(r,
+    @classmethod
+    def action_buttons(cls,
+                       r,
                        deletable=True,
                        editable=True,
                        copyable=False,
@@ -2520,9 +2548,7 @@ class S3CRUD(S3Method):
             table = r.table
             args = ["[id]"]
 
-        get_vars = Storage()
-        if "viewing" in r.get_vars:
-            get_vars["viewing"] = r.get_vars["viewing"]
+        get_vars = cls._linkto_vars(r)
 
         # If this request is in iframe-format, action URLs should be in
         # iframe-format as well
@@ -2607,7 +2633,6 @@ class S3CRUD(S3Method):
         # Append custom actions
         if custom_actions:
             s3.actions = s3.actions + custom_actions
-        return
 
     # -------------------------------------------------------------------------
     def _default_cancel_button(self, r):
@@ -2689,7 +2714,7 @@ class S3CRUD(S3Method):
     @staticmethod
     def import_url(r):
         """
-            Import data from URL query
+            Import data from vars in URL query
 
             @param r: the S3Request
             @note: can only update single records (no mass-update)
@@ -2971,6 +2996,7 @@ class S3CRUD(S3Method):
                 except TypeError:
                     url = linkto % record_id
             else:
+                get_vars = self._linkto_vars(r)
                 if r.component:
                     if r.link and not r.actuate_link():
                         # We're rendering a link table here, but must
@@ -2995,22 +3021,16 @@ class S3CRUD(S3Method):
                         args = [r.id, r.component_name, record_id]
                     if update:
                         url = str(URL(r=r, c=c, f=f,
-                                      args=args + ["update"],
-                                      # Don't forward all vars unconditionally
-                                      #vars=r.get_vars
+                                      args = args + ["update"],
+                                      vars = get_vars
                                       ))
                     else:
                         url = str(URL(r=r, c=c, f=f,
-                                      args=args + ["read"],
-                                      # Don't forward all vars unconditionally
-                                      #vars=r.get_vars
+                                      args = args + ["read"],
+                                      vars = get_vars
                                       ))
                 else:
                     args = [record_id]
-                    # Don't forward get_vars, except "viewing"
-                    get_vars = Storage()
-                    if "viewing" in r.get_vars:
-                        get_vars.viewing = r.get_vars["viewing"]
                     if update:
                         url = str(URL(r=r, c=c, f=f,
                                       args = args + ["update"],
@@ -3026,6 +3046,32 @@ class S3CRUD(S3Method):
             return url
 
         return list_linkto
+
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _linkto_vars(r):
+        """
+            Retain certain GET vars of the request in action links
+
+            @param r: the S3Request
+
+            @return: Storage with GET vars
+        """
+
+        get_vars = r.get_vars
+        linkto_vars = Storage()
+
+        # Retain "viewing"
+        if not r.component and "viewing" in get_vars:
+            linkto_vars.viewing = get_vars["viewing"]
+
+        keep_vars = current.response.s3.crud.keep_vars
+        if keep_vars:
+            for key in keep_vars:
+                if key in get_vars:
+                    linkto_vars[key] = get_vars[key]
+
+        return linkto_vars
 
     # -------------------------------------------------------------------------
     @staticmethod

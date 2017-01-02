@@ -227,7 +227,8 @@ class S3XML(S3Codec):
             try:
                 source = urllib2.urlopen(source)
             except:
-                pass
+                self.error = "XML Source error: %s" % sys.exc_info()[1]
+                return None
         try:
             parser = etree.XMLParser(no_network = False,
                                      remove_blank_text = True,
@@ -235,8 +236,7 @@ class S3XML(S3Codec):
             result = etree.parse(source, parser)
             return result
         except:
-            e = sys.exc_info()[1]
-            self.error = e
+            self.error = "XML Parse error: %s" % sys.exc_info()[1]
             return None
 
     # -------------------------------------------------------------------------
@@ -1556,13 +1556,14 @@ class S3XML(S3Codec):
             is_text = field_type in ("string", "text")
 
             if value is None:
-                decode_value = not is_text
                 if field_type == "password":
                     value = child.text
                     # Do not re-encrypt the password if it already
                     # comes encrypted:
                     skip_validation = True
+                    decode_value = False
                 else:
+                    decode_value = not is_text
                     value = xml_decode(child.text)
             else:
                 decode_value = True
@@ -1667,7 +1668,7 @@ class S3XML(S3Codec):
         options = None
         try:
             field = table[fieldname]
-        except AttributeError:
+        except (KeyError, AttributeError):
             pass
         else:
             requires = field.requires

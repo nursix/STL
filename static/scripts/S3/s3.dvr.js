@@ -22,14 +22,23 @@
          * Default options
          *
          * @prop {string} tablename - the tablename used for the form
-         * @prop {bool} ajax - data submission using Ajax
+         * @prop {boolean} ajax - data submission using Ajax
          * @prop {string} ajaxURL - the URL to send Ajax requests to
+         *
+         * @prop {boolean} showPicture - true=always show profile picture
+         *                               false=show profile picture on demand
+         * @prop {string} showPictureText - button label for "Show Picture"
+         * @prop {string} hidePictureText - button label for "Hide Picture"
          */
         options: {
 
             tablename: 'case_event',
             ajax: null,
-            ajaxURL: ''
+            ajaxURL: '',
+
+            showPicture: true,
+            showPictureText: 'Show Picture',
+            hidePictureText: 'Hide Picture'
         },
 
         /**
@@ -61,6 +70,7 @@
             this.eventType = form.find('input[type="hidden"][name="event"]');
             this.blockingInfo = form.find('input[type="hidden"][name="intervals"]');
             this.actionDetails = form.find('input[type="hidden"][name="actions"]');
+            this.imageURL = form.find('input[type="hidden"][name="image"]');
 
             // Get blocked events from hidden input
             var intervals = this.blockingInfo.val();
@@ -99,6 +109,9 @@
 
             // Show flag info at start
             this._showFlagInfo();
+
+            // Show profile picture at start
+            this._showProfilePicture();
 
             // Enable styles on details row
             $(this.element).find(prefix + '_details__row .controls').addClass('has-details');
@@ -153,6 +166,9 @@
                 // Show a throbber
                 throbber = $('<div class="inline-throbber">').insertAfter(personInfo),
                 self = this;
+
+            // Remove profile picture
+            this._removeProfilePicture();
 
             // Clear action details
             this._clearDetails();
@@ -210,6 +226,11 @@
                         // Render details
                         if (data.d) {
                             self._updateDetails(data.d, actionable);
+                        }
+
+                        if (data.b) {
+                            self.imageURL.val(data.b);
+                            self._showProfilePicture();
                         }
 
                         // Update blocked events
@@ -338,12 +359,14 @@
             }
             if (info) {
                 // Check the date
-                var message = '<div class="small-12 columns">' + info[0] + '</div>',
+                var message = $('<h6>').addClass('event-registration-blocked')
+                                       .html(info[0]),
                     date = new Date(info[1]),
                     now = new Date();
                 if (date > now) {
                     // Event registration is blocked, show message and return
-                    this.blockingMessage = $(message).css({color:'red'})
+                    this.blockingMessage = $('<div>').addClass('small-12-columns')
+                                                     .append(message)
                                                      .prependTo($('#submit_record__row'));
                     return false;
                 }
@@ -386,6 +409,73 @@
                     }
                 }
                 advise.slideDown();
+            }
+        },
+
+        /**
+         * Render a panel to show the profile picture (automatically loads
+         * the picture if options.showPicture is true)
+         */
+        _showProfilePicture: function() {
+
+            var el = $(this.element),
+                opts = this.options,
+                imageURL = this.imageURL.val();
+
+            this._removeProfilePicture();
+
+            if (!imageURL) {
+                return;
+            }
+
+            var button = $('<button class="tiny secondary button toggle-picture" type="button">'),
+                buttonRow = $('<div class="button-row">').append(button);
+            button.text(opts.showPictureText);
+
+            var panel = $('<div class="panel profile-picture">');
+            panel.append(buttonRow)
+                 .data('url', imageURL)
+                 .appendTo(el);
+
+            if (opts.showPicture) {
+                this._togglePicture();
+            }
+        },
+
+        /**
+         * Remove the profile picture panel
+         */
+        _removeProfilePicture: function() {
+
+            this.imageURL.val('');
+            $(this.element).find('.panel.profile-picture').remove();
+        },
+
+        /**
+         * Show or hide the profile picture (click handler for toggle button)
+         */
+        _togglePicture: function() {
+
+            var el = $(this.element),
+                opts = this.options,
+                container = el.find('.panel.profile-picture');
+
+            if (container.length) {
+                var imageRow = container.find('.image-row'),
+                    imageURL = container.data('url'),
+                    toggle = container.find('button.toggle-picture');
+
+                if (imageRow.length) {
+                    imageRow.remove();
+                    toggle.text(opts.showPictureText);
+                } else {
+                    if (imageURL) {
+                        var image = $('<img>').attr('src', imageURL);
+                        imageRow = $('<div class="image-row">').append(image);
+                        container.prepend(imageRow);
+                        toggle.text(opts.hidePictureText);
+                    }
+                }
             }
         },
 
@@ -539,8 +629,8 @@
         },
 
         /**
-        * Helper function to hide any alert messages that are currently shown
-        */
+         * Helper function to hide any alert messages that are currently shown
+         */
         _clearAlert: function() {
 
             $('.alert-error, .alert-warning, .alert-info, .alert-success').fadeOut('fast');
@@ -548,12 +638,12 @@
         },
 
         /**
-        * Helper function to remove the person data and empty the label input,
-        * also re-enabling the ID check button while hiding the registration button
-        *
-        * @param {bool} keepAlerts - do not clear the alert space
-        * @param {bool} keepLabel - do not clear the label input field
-        */
+         * Helper function to remove the person data and empty the label input,
+         * also re-enabling the ID check button while hiding the registration button
+         *
+         * @param {bool} keepAlerts - do not clear the alert space
+         * @param {bool} keepLabel - do not clear the label input field
+         */
         _clearForm: function(keepAlerts, keepLabel) {
 
             var prefix = this.idPrefix;
@@ -573,6 +663,9 @@
 
             // Hide person info
             $(prefix + '_person__row .controls').hide().empty();
+
+            // Remove profile picture
+            this._removeProfilePicture();
 
             // Clear details
             this._clearDetails();
@@ -651,6 +744,11 @@
                 eventTypeSelector.slideUp();
             });
 
+            form.delegate('.toggle-picture', 'click' + ns, function(e) {
+                e.preventDefault();
+                self._togglePicture();
+            });
+
             // Cancel-button to clear the form
             form.find('a.cancel-action').bind('click' + ns, function(e) {
                 e.preventDefault();
@@ -713,6 +811,8 @@
             form.find('.check-btn').unbind(ns);
 
             form.find('.submit-btn').unbind(ns);
+
+            form.undelegate(ns);
 
             return true;
         }

@@ -41,6 +41,7 @@ __all__ = ("S3DateFilter",
            "S3SliderFilter",
            "S3TextFilter",
            "s3_get_filter_opts",
+           "s3_set_default_filter",
            )
 
 import datetime
@@ -654,6 +655,8 @@ class S3DateFilter(S3RangeFilter):
 
             # Do we want a timepicker?
             timepicker = False if ftype == "date" or hide_time else True
+            if timepicker:
+                input_class += " datetimepicker"
 
             # Make the two inputs constrain each other
             set_min = set_max = None
@@ -1465,7 +1468,7 @@ class S3OptionsFilter(S3FilterWidget):
         """
 
         attr = self._attr(resource)
-        opts = self.opts
+        opts_get = self.opts.get
         name = attr["_name"]
 
         # Get the options
@@ -1479,7 +1482,7 @@ class S3OptionsFilter(S3FilterWidget):
         # search for records containing all the options or any
         # of the options:
         if len(options) > 1 and ftype[:4] == "list":
-            operator = opts.get("operator", None)
+            operator = opts_get("operator", None)
             if operator:
                 self.operator = operator
                 any_all = ""
@@ -1519,26 +1522,27 @@ class S3OptionsFilter(S3FilterWidget):
             any_all = ""
 
         # Initialize widget
-        #widget_type = opts["widget"]
+        #widget_type = opts_get("widget")
         # Use groupedopts widget if we specify cols, otherwise assume multiselect
-        cols = opts.get("cols", None)
+        cols = opts_get("cols", None)
         if cols:
             widget_class = "groupedopts-filter-widget"
             w = S3GroupedOptionsWidget(options = options,
-                                       multiple = opts.get("multiple", True),
+                                       multiple = opts_get("multiple", True),
                                        cols = cols,
-                                       size = opts["size"] or 12,
-                                       help_field = opts["help_field"],
-                                       sort = opts.get("sort", True),
-                                       orientation = opts.get("orientation"),
+                                       size = opts_get("size", 12),
+                                       help_field = opts_get("help_field"),
+                                       sort = opts_get("sort", True),
+                                       orientation = opts_get("orientation"),
                                        )
         else:
             # Default widget_type = "multiselect"
             widget_class = "multiselect-filter-widget"
-            w = S3MultiSelectWidget(filter = opts.get("filter", "auto"),
-                                    header = opts.get("header", False),
-                                    selectedList = opts.get("selectedList", 3),
-                                    multiple = opts.get("multiple", True),
+            w = S3MultiSelectWidget(filter = opts_get("filter", "auto"),
+                                    header = opts_get("header", False),
+                                    selectedList = opts_get("selectedList", 3),
+                                    noneSelectedText = opts_get("noneSelectedText", "Select"),
+                                    multiple = opts_get("multiple", True),
                                     )
 
 
@@ -2265,7 +2269,7 @@ class S3FilterForm(object):
         if clear:
             _class = "filter-clear"
             if clear is True:
-                label = T("Clear filter")
+                label = T("Clear Filter")
             elif isinstance(clear, (list, tuple)):
                 label = clear[0]
                 _class = "%s %s" % (clear[1], _class)
@@ -2308,9 +2312,11 @@ class S3FilterForm(object):
         advanced = False
         for f in self.widgets:
             widget = f(resource, get_vars, alias=alias)
-            label = f.opts["label"]
-            comment = f.opts["comment"]
-            hidden = f.opts["hidden"]
+            widget_opts = f.opts
+            label = widget_opts["label"]
+            comment = widget_opts["comment"]
+            hidden = widget_opts["hidden"]
+            widget_formstyle = widget_opts.get("formstyle", formstyle)
             if hidden:
                 advanced = True
             widget_id = f.attr["_id"]
@@ -2326,7 +2332,7 @@ class S3FilterForm(object):
                 label = ""
             if not comment:
                 comment = ""
-            formrow = formstyle(row_id, label, widget, comment, hidden=hidden)
+            formrow = widget_formstyle(row_id, label, widget, comment, hidden=hidden)
             if hidden:
                 if isinstance(formrow, DIV):
                     formrow.add_class("advanced")
@@ -3247,5 +3253,26 @@ def s3_get_filter_opts(tablename,
     else:
         opts = {}
     return opts
+
+# =============================================================================
+def s3_set_default_filter(selector, value, tablename=None):
+    """
+        Set a default filter for selector.
+
+        @param selector: the field selector
+        @param value: the value, can be a dict {operator: value},
+                      a list of values, or a single value, or a
+                      callable that returns any of these
+        @param tablename: the tablename
+    """
+
+    s3 = current.response.s3
+
+    filter_defaults = s3
+    for level in ("filter_defaults", tablename):
+        if level not in filter_defaults:
+            filter_defaults[level] = {}
+        filter_defaults = filter_defaults[level]
+    filter_defaults[selector] = value
 
 # END =========================================================================

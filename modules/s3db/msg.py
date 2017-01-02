@@ -605,7 +605,9 @@ class S3EmailModel(S3ChannelModel):
                      Field("username"),
                      Field("password", "password", length=64,
                            readable = False,
-                           requires = IS_NOT_EMPTY(),
+                           requires = [IS_NOT_EMPTY(),
+                                       IS_LENGTH(64),
+                                       ],
                            widget = S3PasswordWidget(),
                            ),
                      # Set true to delete messages from the remote
@@ -643,7 +645,7 @@ class S3EmailModel(S3ChannelModel):
                      s3_datetime(default = "now"),
                      Field("subject", length=78,    # RFC 2822
                            label = T("Subject"),
-                           requires = IS_EMPTY_OR(IS_LENGTH(78)),
+                           requires = IS_LENGTH(78),
                            ),
                      Field("body", "text",
                            label = T("Message"),
@@ -737,7 +739,9 @@ class S3FacebookModel(S3ChannelModel):
                            ),
                      Field("app_secret", "password", length=64,
                            readable = False,
-                           requires = IS_NOT_EMPTY(),
+                           requires = [IS_NOT_EMPTY(),
+                                       IS_LENGTH(64),
+                                       ],
                            widget = S3PasswordWidget(),
                            ),
                      # Optional
@@ -862,7 +866,9 @@ class S3MCommonsModel(S3ChannelModel):
                            represent = s3_yes_no_represent,
                            ),
                      Field("campaign_id", length=128, unique=True,
-                           requires = IS_NOT_EMPTY(),
+                           requires = [IS_NOT_EMPTY(),
+                                       IS_LENGTH(128),
+                                       ],
                            ),
                      Field("url",
                            default = \
@@ -1040,6 +1046,7 @@ class S3ParsingModel(S3Model):
         # ---------------------------------------------------------------------
         # Message parsing status
         # - component to core msg_message table
+        # - messages which need parsing are placed here & updated when parsed
         #
         tablename = "msg_parsing_status"
         define_table(tablename,
@@ -1284,6 +1291,7 @@ class S3RSSModel(S3ChannelModel):
 
     names = ("msg_rss_channel",
              "msg_rss",
+             "msg_rss_link",
              )
 
     def model(self):
@@ -1303,6 +1311,7 @@ class S3RSSModel(S3ChannelModel):
                      super_link("channel_id", "msg_channel"),
                      Field("name", length=255, unique=True,
                            label = T("Name"),
+                           requires = IS_LENGTH(255),
                            ),
                      Field("description",
                            label = T("Description"),
@@ -1315,6 +1324,13 @@ class S3RSSModel(S3ChannelModel):
                      Field("url",
                            label = T("URL"),
                            requires = IS_URL(),
+                           ),
+                     Field("content_type", "boolean",
+                           default = False,
+                           label = T("Content-Type Override"),
+                           represent = s3_yes_no_represent,
+                           # Some feeds have text/html set which feedparser refuses to parse
+                           comment = T("Force content-type to application/xml"),
                            ),
                      s3_datetime(label = T("Last Polled"),
                                  writable = False,
@@ -1417,6 +1433,41 @@ class S3RSSModel(S3ChannelModel):
                                       "body"
                                       ],
                        super_entity = current.s3db.msg_message,
+                       )
+        # Components
+        self.add_components(tablename,
+                            msg_rss_link = "rss_id",
+                            )
+
+        rss_represent = S3Represent(lookup = tablename,
+                                    fields = ["title", "from_address",],
+                                    field_sep = " - ")
+
+        rss_id = S3ReusableField("rss_id", "reference %s" % tablename,
+                                 label = T("RSS Link"),
+                                 ondelete = "CASCADE",
+                                 represent = rss_represent,
+                                 requires = IS_EMPTY_OR(
+                                                IS_ONE_OF(db, "msg_rss.id",
+                                                          rss_represent)),
+                                 )
+
+        # ---------------------------------------------------------------------
+        # Links for RSS Feed
+        #
+        tablename = "msg_rss_link"
+        define_table(tablename,
+                     rss_id(),
+                     Field("url",
+                           requires = IS_EMPTY_OR(IS_URL()),
+                           ),
+                     Field("type",
+                           ),
+                     *s3_meta_fields())
+
+        self.configure(tablename,
+                       deduplicate = S3Duplicate(primary = ("rss_id", "url"),
+                                                 ),
                        )
 
         # ---------------------------------------------------------------------
@@ -1579,9 +1630,11 @@ class S3SMSOutboundModel(S3Model):
                      Field("name"),
                      Field("description"),
                      Field("address", length=64,
-                           requires = IS_NOT_EMPTY(),
+                           requires = IS_LENGTH(64),
                            ),
-                     Field("subject", length=64),
+                     Field("subject", length=64,
+                           requires = IS_LENGTH(64),
+                           ),
                      Field("enabled", "boolean",
                            default = True,
                            ),
@@ -1765,11 +1818,15 @@ class S3TwilioModel(S3ChannelModel):
                                "https://api.twilio.com/2010-04-01/Accounts"
                            ),
                      Field("account_sid", length=64,
-                           requires = IS_NOT_EMPTY(),
+                           requires = [IS_NOT_EMPTY(),
+                                       IS_LENGTH(64),
+                                       ],
                            ),
                      Field("auth_token", "password", length=64,
                            readable = False,
-                           requires = IS_NOT_EMPTY(),
+                           requires = [IS_NOT_EMPTY(),
+                                       IS_LENGTH(64),
+                                       ],
                            widget = S3PasswordWidget(),
                            ),
                      *s3_meta_fields())
@@ -1904,6 +1961,7 @@ class S3TwitterModel(S3Model):
                                  ),
                      Field("body", length=140,
                            label = T("Message"),
+                           requires = IS_LENGTH(140),
                            ),
                      Field("from_address", #notnull=True,
                            label = T("From"),
@@ -2348,9 +2406,11 @@ class S3BaseStationModel(S3Model):
 
         if current.deployment_settings.get_msg_basestation_code_unique():
             db = current.db
-            code_unique = IS_EMPTY_OR(IS_NOT_IN_DB(db, "msg_basestation.code"))
+            code_requires = IS_EMPTY_OR([IS_LENGTH(10),
+                                         IS_NOT_IN_DB(db, "msg_basestation.code")
+                                         ])
         else:
-            code_unique = None
+            code_requires = IS_LENGTH(10)
 
         tablename = "msg_basestation"
         self.define_table(tablename,
@@ -2358,11 +2418,13 @@ class S3BaseStationModel(S3Model):
                           Field("name", notnull=True,
                                 length=64, # Mayon Compatibility
                                 label = T("Name"),
-                                requires = IS_NOT_EMPTY(),
+                                requires = [IS_NOT_EMPTY(),
+                                            IS_LENGTH(64),
+                                            ],
                                 ),
                           Field("code", length=10, # Mayon compatibility
                                 label = T("Code"),
-                                requires = code_unique,
+                                requires = code_requires,
                                 ),
                           self.org_organisation_id(
                                  label = T("Operator"),
