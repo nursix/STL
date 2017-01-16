@@ -29,6 +29,7 @@ def infoln(msg):
 # Load models for tables
 etable = s3db.dvr_economy
 atable = s3db.dvr_case_activity
+ftable = s3db.dvr_activity_funding
 
 IMPORT_XSLT_FOLDER = os.path.join(request.folder, "static", "formats", "s3csv")
 TEMPLATE_FOLDER = os.path.join(request.folder, "modules", "templates", "STL")
@@ -69,6 +70,31 @@ if not failed:
         query = (etable.deleted != True)
         try:
             db(query).update(average_weekly_income=None)
+        except:
+            failed = True
+
+    if failed:
+        infoln("...failed")
+    else:
+        infoln("...done (%s records migrated)" % migrated)
+
+# -----------------------------------------------------------------------------
+# Migrate dvr_activity_funding.proposal to dvr_activity_funding.reason
+#
+if not failed:
+    info("Migrate activity funding records")
+
+    query = (ftable.deleted != True)
+
+    migrated = 0
+    try:
+        migrated = db(query).update(reason = ftable.proposal)
+    except:
+        failed = True
+    else:
+        query = (ftable.deleted != True)
+        try:
+            db(query).update(proposal=None)
         except:
             failed = True
 
