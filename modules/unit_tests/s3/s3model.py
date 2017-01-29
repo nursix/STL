@@ -6,9 +6,13 @@
 # python web2py.py -S eden -M -R applications/eden/modules/unit_tests/s3/s3model.py
 #
 import unittest
-from gluon import current
+from gluon import current, IS_NOT_EMPTY, IS_EMPTY_OR
+from gluon.languages import lazyT
+from gluon.storage import Storage
 
 from s3.s3fields import s3_meta_fields
+from s3.s3model import DYNAMIC_PREFIX, S3DynamicModel
+from s3.s3validators import IS_NOT_ONE_OF
 
 from unit_tests import run_suite
 
@@ -229,11 +233,165 @@ class S3SuperEntityTests(unittest.TestCase):
         self.assertFalse(super_record.deleted)
 
 # =============================================================================
+class S3DynamicModelTests(unittest.TestCase):
+    """ Dynamic Model Tests """
+
+    TABLENAME = "%s_test" % DYNAMIC_PREFIX
+
+    # -------------------------------------------------------------------------
+    @classmethod
+    def setUpClass(cls):
+
+        s3db = current.s3db
+
+        # Create a dynamic table
+        ttable = s3db.s3_table
+        table_id = ttable.insert(name = cls.TABLENAME,
+                                 )
+
+        # Add two fields
+        ftable = s3db.s3_field
+        ftable.insert(table_id = table_id,
+                      name = "name",
+                      field_type = "string",
+                      label = "My Name",
+                      comments = "Explanation of the field",
+                      )
+        ftable.insert(table_id = table_id,
+                      name = "some_number",
+                      field_type = "integer",
+                      )
+
+    # -------------------------------------------------------------------------
+    @classmethod
+    def tearDownClass(cls):
+
+        # Remove the dynamic table
+        s3db = current.s3db
+
+        ttable = s3db.s3_table
+        query = (ttable.name == cls.TABLENAME)
+        current.db(query).delete()
+
+    # -------------------------------------------------------------------------
+    def testDynamicTableInstantiationFailure(self):
+        """ Test attempted instantiation of nonexistent dynamic table """
+
+        # Attribute/Key access raises attribute error
+        with self.assertRaises(AttributeError):
+            current.s3db.s3dt_nonexistent
+        with self.assertRaises(AttributeError):
+            current.s3db["s3dt_nonexistent"]
+
+        # table() function returns None
+        table = current.s3db.table("s3dt_nonexistent")
+        self.assertEqual(table, None)
+
+    # -------------------------------------------------------------------------
+    def testDynamicTableInstantiation(self):
+        """ Test instantiation of dynamic tables with S3Model """
+
+        assertEqual = self.assertEqual
+        assertNotEqual = self.assertNotEqual
+        assertIn = self.assertIn
+        assertTrue = self.assertTrue
+
+        s3db = current.s3db
+
+        # Check if s3db.table can instantiate the table
+        table = s3db.table(self.TABLENAME)
+        assertNotEqual(table, None)
+        assertTrue(self.TABLENAME in current.db)
+
+        # Verify that it contains the right fields of the right type
+        fields = table.fields
+
+        assertIn("name", fields)
+        field = table.name
+        assertEqual(field.type, "string")
+        # Internationalised custom label
+        assertTrue(type(field.label) is lazyT)
+        assertEqual(field.label.m, "My Name")
+        # Internationalised comment
+        assertTrue(type(field.comment) is lazyT)
+        assertEqual(field.comment.m, "Explanation of the field")
+
+        assertIn("some_number", fields)
+        field = table.some_number
+        assertEqual(field.type, "integer")
+        # Internationalised default label
+        assertTrue(type(field.label) is lazyT)
+        assertEqual(field.label.m, "Some Number")
+        # No comment
+        assertEqual(field.comment, None)
+
+        # Verify that meta-fields have automatically been added
+        assertIn("uuid", fields)
+
+    # -------------------------------------------------------------------------
+    def testStringFieldConstruction(self):
+        """
+            Test construction of string field
+        """
+
+        assertEqual = self.assertEqual
+        assertTrue = self.assertTrue
+        assertFalse = self.assertFalse
+
+        dm = S3DynamicModel(self.TABLENAME)
+        define_field = dm._field
+
+        # Default string field, not unique and empty allowed
+        params = Storage(name = "name",
+                         field_type = "string",
+                         )
+        field = define_field(self.TABLENAME, params)
+        assertEqual(field.name, "name")
+        assertEqual(field.type, "string")
+        assertFalse(field.requires)
+
+        # String field, not unique but empty not allowed
+        params = Storage(name = "name",
+                         field_type = "string",
+                         require_not_empty = True,
+                         )
+        field = define_field(self.TABLENAME, params)
+        assertEqual(field.name, "name")
+        assertEqual(field.type, "string")
+        assertTrue(isinstance(field.requires, IS_NOT_EMPTY))
+
+        # String field, unique and empty not allowed
+        params = Storage(name = "name",
+                         field_type = "string",
+                         require_unique = True,
+                         require_not_empty = True,
+                         )
+        field = define_field(self.TABLENAME, params)
+        assertEqual(field.name, "name")
+        assertEqual(field.type, "string")
+        assertTrue(isinstance(field.requires, IS_NOT_ONE_OF))
+
+        # String field, unique or empty
+        params = Storage(name = "name",
+                         field_type = "string",
+                         require_unique = True,
+                         require_not_empty = False,
+                         )
+        field = define_field(self.TABLENAME, params)
+        assertEqual(field.name, "name")
+        assertEqual(field.type, "string")
+        requires = field.requires
+        assertTrue(isinstance(requires, IS_EMPTY_OR))
+        requires = requires.other
+        assertTrue(isinstance(requires, IS_NOT_ONE_OF))
+
+# =============================================================================
 if __name__ == "__main__":
 
     run_suite(
         #S3ModelTests,
         S3SuperEntityTests,
+        S3DynamicModelTests,
     )
 
 # END ========================================================================

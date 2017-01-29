@@ -359,6 +359,21 @@ def config(settings):
 
         weather = DIV(item, _id="cms_weather", _class="cms_content")
 
+        # Show Check-in/Check-out action only if user is permitted
+        # to update shelter registrations (NB controllers may be
+        # read-only, therefore checking against default here):
+        if auth.s3_has_permission("update",
+                                  "cr_shelter_registration",
+                                  c="default",
+                                  ):
+            # Action button for check-in/out
+            cico = A("%s / %s" % (T("Check-In"), T("Check-Out")),
+                     _href=r.url(method="check-in"),
+                     _class="action-btn dashboard-action",
+                     )
+        else:
+            cico = ""
+
         # Generate profile header HTML
         output = DIV(H2(record.name),
                      P(record.comments or ""),
@@ -380,11 +395,7 @@ def config(settings):
                                  ),
                               ),
                            ),
-                     # Action button for check-in/out
-                     A("%s / %s" % (T("Check-In"), T("Check-Out")),
-                       _href=r.url(method="check-in"),
-                       _class="action-btn dashboard-action",
-                       ),
+                     cico,
                      _class="profile-header",
                      )
 
@@ -682,6 +693,14 @@ def config(settings):
                         # Dashboard and Check-in/out UI
                         current.auth.permission.fail()
 
+                if r.interactive:
+
+                    resource = r.resource
+                    resource.configure(filter_widgets = None,
+                                       insertable = False,
+                                       deletable = False,
+                                       )
+
             if r.component_name == "shelter_unit":
                 # Expose "transitory" flag for housing units
                 utable = current.s3db.cr_shelter_unit
@@ -713,6 +732,9 @@ def config(settings):
 
             return output
         s3.postp = custom_postp
+
+        attr = dict(attr)
+        attr["rheader"] = drk_cr_rheader
 
         return attr
 
@@ -890,6 +912,33 @@ def config(settings):
                                 having = (etable.date.max() == None),
                                 )
         return set(row.person_id for row in rows)
+
+    # -------------------------------------------------------------------------
+    def customise_pr_person_resource(r, tablename):
+
+        s3db = current.s3db
+        has_permission = current.auth.s3_has_permission
+
+        # Users who can not register new residents also have
+        # only limited write-access to basic details of residents
+        if r.controller == "dvr" and not has_permission("create", "pr_person"):
+
+            # Can not write any fields in main person record
+            # (fields in components may still be writable, though)
+            ptable = s3db.pr_person
+            for field in ptable:
+                field.writable = False
+
+            # Can not add or edit contact data in person form
+            s3db.configure("pr_contact", insertable=False)
+
+            # Can not update shelter registration from person form
+            # (check-in/check-out may still be permitted, however)
+            rtable = s3db.cr_shelter_registration
+            for field in rtable:
+                field.writable = False
+
+    settings.customise_pr_person_resource = customise_pr_person_resource
 
     # -------------------------------------------------------------------------
     def customise_pr_person_controller(**attr):
@@ -1086,13 +1135,6 @@ def config(settings):
                               )
                 else:
                     absence_field = None
-
-                # Expose expiration dates
-                field = ctable.valid_until
-                field.label = T("BÜMA valid until")
-                field.readable = field.writable = True
-                field = ctable.stay_permit_until
-                field.readable = field.writable = True
 
                 # List modes
                 check_overdue = False
@@ -1493,6 +1535,17 @@ def config(settings):
                                         ]
                     configure(list_fields = list_fields)
 
+                elif r.component_name == "case_appointment":
+
+                    # Make appointments tab read-only even if the user is
+                    # permitted to create or update appointments (via event
+                    # registration), except for ADMINISTRATION/ADMIN_HEAD:
+                    if not has_role("ADMINISTRATION") and \
+                       not has_role("ADMIN_HEAD"):
+                        r.component.configure(insertable = False,
+                                              editable = False,
+                                              deletable = False,
+                                              )
             return result
         s3.prep = custom_prep
 
@@ -1708,6 +1761,22 @@ def config(settings):
 
         s3db.configure(tablename, **config)
 
+        ctable = s3db.dvr_case
+
+        # Expose expiration dates
+        field = ctable.valid_until
+        field.label = T("BÜMA valid until")
+        field.readable = field.writable = True
+        field = ctable.stay_permit_until
+        field.readable = field.writable = True
+
+        # Set all fields read-only except comments, unless
+        # the user has permission to create cases
+        if not current.auth.s3_has_permission("create", "dvr_case"):
+            for field in ctable:
+                if field.name != "comments":
+                    field.writable = False
+
     settings.customise_dvr_case_resource = customise_dvr_case_resource
 
     # -------------------------------------------------------------------------
@@ -1912,7 +1981,7 @@ def config(settings):
                                "need_id",
                                "need_details",
                                "emergency",
-                               "referral_details",
+                               "activity_details",
                                "followup",
                                "followup_date",
                                "completed",
@@ -3003,6 +3072,50 @@ def drk_org_rheader(r, tabs=[]):
             rheader_fields = [["name", "email"],
                               ["organisation_id", "phone1"],
                               ["location_id", "phone2"],
+                              ]
+
+        rheader = S3ResourceHeader(rheader_fields, tabs)(r,
+                                                         table=resource.table,
+                                                         record=record,
+                                                         )
+    return rheader
+
+# =============================================================================
+def drk_cr_rheader(r, tabs=[]):
+    """ CR custom resource headers """
+
+    if r.representation != "html":
+        # Resource headers only used in interactive views
+        return None
+
+    from s3 import s3_rheader_resource, S3ResourceHeader
+
+    tablename, record = s3_rheader_resource(r)
+    if tablename != r.tablename:
+        resource = current.s3db.resource(tablename, id=record.id)
+    else:
+        resource = r.resource
+
+    rheader = None
+    rheader_fields = []
+
+    if record:
+        T = current.T
+
+        if tablename == "cr_shelter":
+
+            if not tabs:
+                tabs = [(T("Basic Details"), None),
+                        (T("Housing Units"), "shelter_unit"),
+                        (T("Client Registration"), "shelter_registration"),
+                        ]
+
+            rheader_fields = [["name",
+                               ],
+                              ["organisation_id",
+                               ],
+                              ["location_id",
+                               ],
                               ]
 
         rheader = S3ResourceHeader(rheader_fields, tabs)(r,

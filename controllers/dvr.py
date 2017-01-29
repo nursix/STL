@@ -470,7 +470,7 @@ def case_activity():
                        "need_id",
                        "need_details",
                        "emergency",
-                       "referral_details",
+                       "activity_details",
                        "followup",
                        "followup_date",
                        "completed",
@@ -506,7 +506,7 @@ def due_followups():
                        "need_id",
                        "need_details",
                        "emergency",
-                       "referral_details",
+                       "activity_details",
                        "followup_date",
                        "completed",
                        ]
@@ -840,6 +840,12 @@ def evaluation():
 # -----------------------------------------------------------------------------
 def evaluation_data():
     """ RESTful CRUD Controller """
+
+    return s3_rest_controller()
+
+# -----------------------------------------------------------------------------
+def referral_type():
+    """ Referral Types: RESTful CRUD Controller """
 
     return s3_rest_controller()
 

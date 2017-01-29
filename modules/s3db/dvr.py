@@ -40,6 +40,7 @@ __all__ = ("DVRCaseModel",
            "DVRActivityFundingModel",
            "DVRNeedsModel",
            "DVRNotesModel",
+           "DVRReferralModel",
            "DVRSiteActivityModel",
            "DVRVulnerabilityModel",
            "dvr_ActivityRepresent",
@@ -609,6 +610,7 @@ class DVRCaseModel(S3Model):
                      s3_date("arrival_date",
                              label = T("Arrival Date"),
                              ),
+                     self.dvr_referral_type_id(),
                      *s3_meta_fields())
 
         # ---------------------------------------------------------------------
@@ -1274,6 +1276,88 @@ class DVRNotesModel(S3Model):
         return {}
 
 # =============================================================================
+class DVRReferralModel(S3Model):
+    """
+        Data model for case referrals (both incoming and outgoing)
+    """
+
+    names = ("dvr_referral_type",
+             "dvr_referral_type_id",
+             )
+
+    def model(self):
+
+        T = current.T
+        db = current.db
+
+        crud_strings = current.response.s3.crud_strings
+
+        # ---------------------------------------------------------------------
+        # Referral Types (how cases are admitted)
+        #
+        tablename = "dvr_referral_type"
+        self.define_table(tablename,
+                          Field("name",
+                                label = T("Name"),
+                                requires = IS_NOT_EMPTY(),
+                                ),
+                          s3_comments(),
+                          *s3_meta_fields())
+
+        # Table configuration
+        self.configure(tablename,
+                       deduplicate = S3Duplicate(),
+                       )
+
+        # CRUD Strings
+        crud_strings[tablename] = Storage(
+            label_create = T("Create Referral Type"),
+            title_display = T("Referral Type Details"),
+            title_list = T("Referral Types"),
+            title_update = T("Edit Referral Type"),
+            label_list_button = T("List Referral Types"),
+            label_delete_button = T("Delete Referral Type"),
+            msg_record_created = T("Referral Type added"),
+            msg_record_modified = T("Referral Type updated"),
+            msg_record_deleted = T("Referral Type deleted"),
+            msg_list_empty = T("No Referral Types found"),
+            )
+
+        # Reusable field
+        represent = S3Represent(lookup=tablename, translate=True)
+        referral_type_id = S3ReusableField("referral_type_id",
+                                           "reference %s" % tablename,
+                                           label = T("Type of Referral"),
+                                           ondelete = "RESTRICT",
+                                           represent = represent,
+                                           requires = IS_EMPTY_OR(
+                                                        IS_ONE_OF(db,
+                                                                  "%s.id" % tablename,
+                                                                  represent,
+                                                                  )),
+                                           )
+
+        # ---------------------------------------------------------------------
+        # Pass names back to global scope (s3.*)
+        #
+        return {"dvr_referral_type_id": referral_type_id,
+                }
+
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def defaults():
+        """ Safe defaults for names in case the module is disabled """
+
+        dummy = S3ReusableField("dummy_id", "integer",
+                                readable = False,
+                                writable = False,
+                                )
+
+        return {"dvr_referral_type_id": lambda name="referral_type_id", **attr: \
+                                               dummy(name, **attr),
+                }
+
+# =============================================================================
 class DVRCaseActivityModel(S3Model):
     """ Model for Case Activities """
 
@@ -1603,12 +1687,33 @@ class DVRCaseActivityModel(S3Model):
                                 readable = service_type,
                                 writable = service_type,
                                 ),
+                     # Alternatives to document the actions performed
+                     # under this activity:
                      activity_id(readable=False,
                                  writable=False,
                                  ),
+                     Field("activity_details", "text",
+                           label = T("Support provided"),
+                           represent = s3_text_represent,
+                           widget = s3_comments_widget,
+                           ),
+                     # Support received by the beneficiary independently
+                     # of the managed activity:
+                     Field("outside_support", "text",
+                           label = T("Outside Support"),
+                           represent = s3_text_represent,
+                           widget = s3_comments_widget,
+                           readable = False,
+                           writable = False,
+                           ),
+                     # Details about referrals made under this activity
+                     # @deprecate: should use activity_details instead
+                     # @todo: remove once templates have been migrated?
                      Field("referral_details", "text",
                            label = T("Support provided"),
                            represent = s3_text_represent,
+                           readable = False,
+                           writable = False,
                            ),
                      Field("followup", "boolean",
                            default = True,
@@ -1660,7 +1765,7 @@ class DVRCaseActivityModel(S3Model):
                        need_field,
                        "need_details",
                        "emergency",
-                       "referral_details",
+                       "activity_details",
                        "followup",
                        "followup_date",
                        "completed",
@@ -1672,7 +1777,7 @@ class DVRCaseActivityModel(S3Model):
                                         "person_id$last_name",
                                         "case_id$reference",
                                         "need_details",
-                                        "referral_details",
+                                        "activity_details",
                                         ],
                                         label = T("Search"),
                                         ),
@@ -3682,6 +3787,10 @@ class DVRActivityFundingModel(S3Model):
                            ),
                      Field("proposal", "text",
                            label = T("Proposed Assistance"),
+                           ),
+                     Field("approved", "boolean",
+                           label = T("Approved"),
+                           represent = s3_yes_no_represent,
                            ),
                      s3_comments(),
                      *s3_meta_fields())
