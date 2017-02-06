@@ -3747,7 +3747,6 @@ class S3PersonIdentityModel(S3Model):
     def model(self):
 
         T = current.T
-        messages = current.messages
 
         # ---------------------------------------------------------------------
         # Identity
@@ -3817,6 +3816,14 @@ class S3PersonIdentityModel(S3Model):
                                 ),
                           #Field("ia_subdivision"), # Name of issuing authority subdivision
                           #Field("ia_code"), # Code of issuing authority (if any)
+                          Field("image", "upload",
+                                autodelete = True,
+                                label = T("Scanned Copy"),
+                                length = current.MAX_FILENAME_LENGTH,
+                                # upload folder needs to be visible to the download() function as well as the upload
+                                uploadfolder = os.path.join(current.request.folder,
+                                                            "uploads"),
+                               ),
                           s3_comments(),
                           *s3_meta_fields())
 
@@ -4056,6 +4063,7 @@ class S3PersonDetailsModel(S3Model):
 
         T = current.T
         gis = current.gis
+        settings = current.deployment_settings
         messages = current.messages
         NONE = messages["NONE"]
         UNKNOWN_OPT = messages.UNKNOWN_OPT
@@ -4082,8 +4090,8 @@ class S3PersonDetailsModel(S3Model):
             3: T("literate"),
         }
 
-        # Religion Options
-        religion_opts = current.deployment_settings.get_L10n_religions()
+        # Language Options
+        languages = settings.get_L10n_languages()
 
         # Nationality Options
         STATELESS = T("Stateless")
@@ -4095,11 +4103,19 @@ class S3PersonDetailsModel(S3Model):
                                         gis.get_country(code, key_type="code") or \
                                         UNKNOWN_OPT
 
+        # Religion Options
+        religion_opts = settings.get_L10n_religions()
+
         tablename = "pr_person_details"
         self.define_table(tablename,
                           self.pr_person_id(label = T("Person"),
                                             ondelete = "CASCADE",
                                             ),
+                          Field("language", length=16,
+                                represent = lambda opt: \
+                                    languages.get(opt, UNKNOWN_OPT),
+                                requires = IS_EMPTY_OR(IS_IN_SET(languages)),
+                                ),
                           Field("nationality",
                                 label = T("Nationality"),
                                 represent = nationality_repr,
@@ -4268,7 +4284,7 @@ class S3PersonTagModel(S3Model):
 
         tablename = "pr_person_tag"
         self.define_table(tablename,
-                          self.pr_person_id(),
+                          self.pr_person_id(ondelete = "CASCADE"),
                           Field("tag",
                                 label = T("Key"),
                                 ),

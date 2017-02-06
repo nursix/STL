@@ -430,7 +430,7 @@ class S3HRModel(S3Model):
                      ),
                      Field("type", "integer",
                            default = 1,
-                           #label = T("Type"),
+                           label = T("Type"),
                            represent = lambda opt: \
                                        hrm_type_opts.get(opt, UNKNOWN_OPT),
                            requires = IS_IN_SET(hrm_type_opts,
@@ -2127,7 +2127,7 @@ class S3HRSkillModel(S3Model):
                                  tooltip = tooltip,
                                  )
 
-        represent = S3Represent(lookup=tablename)
+        represent = S3Represent(lookup=tablename, translate=True)
         skill_id = S3ReusableField("skill_id", "reference %s" % tablename,
                                    label = T("Skill"),
                                    ondelete = "SET NULL",
@@ -2215,7 +2215,7 @@ class S3HRSkillModel(S3Model):
             msg_record_deleted = T("Competency Rating deleted"),
             msg_list_empty = T("Currently no entries in the catalog"))
 
-        represent = S3Represent(lookup=tablename)
+        represent = S3Represent(lookup=tablename, translate=True)
         competency_id = S3ReusableField("competency_id", "reference %s" % tablename,
                                         label = T("Competency"),
                                         ondelete = "RESTRICT",
@@ -4720,7 +4720,7 @@ class hrm_AssignMethod(S3Method):
                            "organisation_id",
                            ]
             if len(types) == 2:
-                list_fields.append((T("Type"),"type"))
+                list_fields.append((T("Type"), "type"))
             list_fields.append("job_title_id")
             if settings.get_hrm_use_certificates():
                 list_fields.append((T("Certificates"), "person_id$certification.certificate_id"))
@@ -6129,7 +6129,7 @@ def hrm_rheader(r, tabs=[], profile=False):
         if profile:
             # Configure for personal mode
             if record_method:
-                hr_tab = (record_label, record_method)
+                hr_tab = (T(record_label), record_method)
             tabs = [(T("Person Details"), None),
                     (T("User Account"), "user"),
                     hr_tab,
@@ -6194,7 +6194,7 @@ def hrm_rheader(r, tabs=[], profile=False):
                 else:
                     awards_tab = None
             if record_method:
-                hr_tab = (hr_record, record_method)
+                hr_tab = (T(hr_record), record_method)
             tabs = [(T("Person Details"), None),
                     hr_tab,
                     id_tab,
@@ -6325,6 +6325,18 @@ def hrm_rheader(r, tabs=[], profile=False):
                             ),
                       rheader_tabs)
 
+    elif resourcename == "certification":
+        # Tabs
+        tabs = [(T("Certification Details"), None),
+                ]
+        rheader_tabs = s3_rheader_tabs(r, tabs)
+        rheader = DIV(TABLE(TR(TH("%s: " % table.person_id.label),
+                               table.person_id.represent(record.person_id)),
+                            TR(TH("%s: " % table.certificate_id.label),
+                               table.certificate_id.represent(record.certificate_id)),
+                            ),
+                      rheader_tabs)
+
     elif resourcename == "course":
         # Tabs
         tabs = [(T("Course Details"), None),
@@ -6347,6 +6359,8 @@ def hrm_rheader(r, tabs=[], profile=False):
                                record.name),
                             ),
                       rheader_tabs)
+    else:
+        rheader = None
 
     return rheader
 
@@ -7523,13 +7537,14 @@ def hrm_training_controller():
     s3db = current.s3db
 
     def prep(r):
+        method = r.method
         if r.interactive or r.representation == "aadata":
             s3db.configure("hrm_training",
                            #insertable = False,
                            listadd = False,
                            )
 
-            if r.method in ("create", "update"):
+            if method in ("create", "update"):
                 # Coming from Profile page?
                 person_id = r.get_vars.get("~.person_id", None)
                 if person_id:
@@ -7538,7 +7553,7 @@ def hrm_training_controller():
                     field.readable = field.writable = False
 
             # @ToDo: Complete
-            #elif r.method == "import":
+            #elif method == "import":
             #    # Allow course to be populated onaccept from training_event_id
             #    table = s3db.hrm_training
             #    s3db.configure("hrm_training",
@@ -7552,12 +7567,20 @@ def hrm_training_controller():
             #    else:
             #        f.writable = True
 
-        if r.method == "report":
+        if method == "report":
             # Configure virtual fields for reports
             s3db.configure("hrm_training", extra_fields=["date"])
             table = s3db.hrm_training
             table.year = Field.Method("year", hrm_training_year)
             table.month = Field.Method("month", hrm_training_month)
+
+        # Can't reliably link to persons as these are imported in random order
+        # - do this postimport if desired (see RMSAmericas)
+        #elif method == "import":
+        #    # If users accounts are created for imported participants
+        #    s3db.configure("auth_user",
+        #                   create_onaccept = lambda form: current.auth.s3_approve_user(form.vars),
+        #                   )
 
         return True
     current.response.s3.prep = prep

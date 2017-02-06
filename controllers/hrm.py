@@ -519,6 +519,38 @@ def certificate():
     return output
 
 # -----------------------------------------------------------------------------
+def certification():
+    """ Certifications Controller """
+
+    # Load Model
+    table = s3db.hrm_certification
+
+    # Over-ride list_fields
+    s3db.configure("hrm_certification",
+                   list_fields = ["person_id",
+                                  "certificate_id",
+                                  "number",
+                                  "date",
+                                  #"comments",
+                                  ],
+                   )
+
+    mode = session.s3.hrm.mode
+    def prep(r):
+        if mode is not None:
+            auth.permission.fail()
+        return True
+    s3.prep = prep
+
+    if settings.get_hrm_filter_certificates() and \
+       not auth.s3_has_role(ADMIN):
+        s3.filter = auth.filter_by_root_org(s3db.hrm_certificate)
+
+    output = s3_rest_controller(rheader = s3db.hrm_rheader,
+                                )
+    return output
+
+# -----------------------------------------------------------------------------
 def certificate_skill():
     """ Certificates to Skills Controller """
 
@@ -604,7 +636,7 @@ def training_center():
 
 # -----------------------------------------------------------------------------
 def training():
-    """ Training Controller - used for Searching for Participants """
+    """ Training Controller - used for Importing/Searching for Participants """
 
     s3.filter = FS("person_id$human_resource.type") == 1
     return s3db.hrm_training_controller()
