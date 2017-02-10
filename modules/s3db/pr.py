@@ -3095,8 +3095,7 @@ class S3AddressModel(S3Model):
             msg_list_empty = T("There is no address for this person yet. Add new address.")
             )
 
-        list_fields = ["id",
-                       "type",
+        list_fields = ["type",
                        (T("Address"), "location_id$addr_street"),
                        ]
 
@@ -4032,8 +4031,7 @@ class S3PersonEducationModel(S3Model):
                                                        ),
                                             ignore_deleted = True,
                                             ),
-                  list_fields = ["id",
-                                 # Normally accessed via component
+                  list_fields = [# Normally accessed via component
                                  #"person_id",
                                  "year",
                                  "level_id",
@@ -6916,12 +6914,13 @@ def pr_human_resource_update_affiliations(person_id):
 
     # Add affiliations to all masters which are not in current affiliations
     #vol_role = current.deployment_settings.get_hrm_vol_affiliation() or OTHER_ROLE
+    role_type = OU
     for role in masters:
-        if role == VOLUNTEER:
-            #role_type = vol_role
-            role_type = OTHER_ROLE
-        else:
-            role_type = OU
+        #if role == VOLUNTEER:
+        #    #role_type = vol_role
+        #    role_type = OTHER_ROLE
+        #else:
+        #    role_type = OU
         for m in masters[role]:
             pr_add_affiliation(m, pe_id, role=role, role_type=role_type)
 
