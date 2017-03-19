@@ -95,6 +95,10 @@ class S3MainMenu(default.S3MainMenu):
                     #homepage("req"),
                     homepage("inv"),
                     SEP(link=False),
+                    MM("Confiscation", c="security", f="seized_item",
+                       restrict = ("ADMINISTRATION", "ADMIN_HEAD"),
+                       ),
+                    SEP(link=False),
                     MM("Surplus Meals", c="default", f="index",
                        args = "surplus_meals",
                        t = "dvr_case_event",
@@ -208,7 +212,7 @@ class S3OptionsMenu(default.S3OptionsMenu):
         if not shelter_id:
             return None
 
-        #ADMIN = current.session.s3.system_roles.ADMIN
+        ADMIN = current.auth.get_system_roles().ADMIN
 
         return M(c="cr")(
                     M("Shelter", f="shelter", args=[shelter_id])(
@@ -220,6 +224,13 @@ class S3OptionsMenu(default.S3OptionsMenu):
                           args = [shelter_id, "shelter_unit"],
                           ),
                     ),
+                    M("Administration",
+                      link = False,
+                      restrict = (ADMIN, "ADMIN_HEAD"),
+                      selectable=False,
+                      )(
+                        M("Shelter Flags", f="shelter_flag"),
+                        ),
                 )
 
     # -------------------------------------------------------------------------
@@ -337,6 +348,18 @@ class S3OptionsMenu(default.S3OptionsMenu):
                     M("Create", m="create"),
                     M("My Open Tasks", vars={"mine":1}),
                  ),
+                )
+
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def security():
+        """ SECURITY / Security Management """
+
+        return M(c="security")(
+                M("Confiscation", f="seized_item")(
+                    M("Create", m="create"),
+                    M("Item Types", f="seized_item_type"),
+                    ),
                 )
 
 # END =========================================================================

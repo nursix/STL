@@ -1038,6 +1038,8 @@ class S3ProjectActivityModel(S3Model):
         # Project Activity
         #
 
+        represent = project_ActivityRepresent()
+
         tablename = "project_activity"
         define_table(tablename,
                      # Instance
@@ -1093,7 +1095,12 @@ class S3ProjectActivityModel(S3Model):
                      #      label = T("Year"),
                      #      ),
                      s3_comments(),
-                     *s3_meta_fields())
+                     *s3_meta_fields(),
+                     on_define = lambda table: \
+                        [# Use the represent for Report drill-downs
+                         table.id.set_attributes(represent = represent),
+                         ]
+                     )
 
         # CRUD Strings
         ACTIVITY_TOOLTIP = T("If you don't see the activity in the list, you can add a new one by clicking link 'Create Activity'.")
@@ -1318,7 +1325,6 @@ class S3ProjectActivityModel(S3Model):
         #                    )
 
         # Reusable Field
-        represent = project_ActivityRepresent()
         activity_id = S3ReusableField("activity_id", "reference %s" % tablename,
                         comment = S3PopupLink(ADD_ACTIVITY,
                                               c = "project",
@@ -1334,11 +1340,6 @@ class S3ProjectActivityModel(S3Model):
                                               sort=True)),
                         sortby="name",
                         )
-
-        # Also use this Represent for Report drilldowns
-        # @todo: make lazy_table
-        table = db[tablename]
-        table.id.represent = represent
 
         # Components
         add_components(tablename,
@@ -3635,6 +3636,7 @@ class S3ProjectLocationModel(S3Model):
                                  "project_location_id",
                                  (T("Project"), "project_location_id$project_id"),
                                  ],
+                  onaccept = self.project_location_contact_onaccept,
                   )
 
         # Components
@@ -3705,6 +3707,38 @@ class S3ProjectLocationModel(S3Model):
             name = name[:509] + "..."
         db = current.db
         db(db.project_location.id == id).update(name=name)
+
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def project_location_contact_onaccept(form):
+        """
+            If the Contact has no Realm, then set it to that of this record
+        """
+
+        db = current.db
+        form_vars = form.vars
+        person_id = form_vars.get("person_id")
+        realm_entity = form_vars.get("realm_entity")
+        if not person_id or not realm_entity:
+            # Retrieve the record
+            table = db.project_location_contact
+            record = db(table.id == form_vars.get("id")).select(table.person_id,
+                                                                table.realm_entity,
+                                                                limitby=(0, 1),
+                                                                ).first()
+            if not record:
+                return
+            person_id = record.person_id
+            realm_entity = record.realm_entity
+
+        if realm_entity:
+            ptable = db.pr_person
+            person = db(ptable.id == person_id).select(ptable.id,
+                                                       ptable.realm_entity,
+                                                       limitby=(0, 1),
+                                                       ).first()
+            if person and not person.realm_entity:
+                person.update_record(realm_entity = realm_entity)
 
 # =============================================================================
 class S3ProjectOrganisationModel(S3Model):
@@ -8087,16 +8121,12 @@ class S3ProjectTaskModel(S3Model):
                            writable = staff,
                            ),
                      Field.Method("task_id", self.project_task_task_id),
-                     *s3_meta_fields())
-
-        # Field configurations
-        # Comment these if you don't need a Site associated with Tasks
-        #table.site_id.readable = table.site_id.writable = True
-        #table.site_id.label = T("Check-in at Facility") # T("Managing Office")
-        # @todo: make lazy_table
-        table = db[tablename]
-        table.created_on.represent = lambda dt: \
-                                        S3DateTime.date_represent(dt, utc=True)
+                     *s3_meta_fields(),
+                     on_define = lambda table: \
+                        [table.created_on.set_attributes(represent = lambda dt: \
+                            S3DateTime.date_represent(dt, utc=True)),
+                         ]
+                     )
 
         # CRUD Strings
         ADD_TASK = T("Create Task")

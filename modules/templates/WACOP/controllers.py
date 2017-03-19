@@ -80,6 +80,9 @@ class index(S3CustomController):
                           orderby = "event_incident.name",
                           )
 
+        s3 = current.response.s3
+        s3.scripts.append("/%s/static/themes/WACOP/js/bookmarks.js" % current.request.application)
+        s3.jquery_ready.append('''wacop_bookmarks()''')
         self._view(THEME, "index.html")
         return output
 
@@ -416,12 +419,39 @@ class custom_WACOP(S3CRUD):
                          _class="row well blue",
                          )
             gttable = s3db.gis_location_tag
+            auth = current.auth
+            if auth.is_logged_in():
+                logged_in = True
+                user_id = auth.user.id
+                btable = s3db.cms_post_user
+                bquery = (btable.post_id.belongs([row["cms_post.id"] for row in rows])) & \
+                         (btable.deleted == False)
+                bookmarks = db(bquery).select(btable.post_id)
+                bookmarks = [b.post_id for b in bookmarks]
+            else:
+                logged_in = False
             for row in rows:
                 record_id = row["cms_post.id"]
                 status = row["cms_post.status_id"]
                 post_dt = row._row["cms_post.date"]
                 post_date = post_dt.date().strftime("%b %d, %Y")
                 post_time = post_dt.time().strftime("%H:%M")
+                if logged_in:
+                    if record_id in bookmarks:
+                        bookmark = LI(ICON("bookmark"),
+                                      _title=T("Remove Bookmark"),
+                                      _class="item bookmark",
+                                      )
+                    else:
+                        bookmark = LI(ICON("bookmark-empty"),
+                                      _title=T("Add Bookmark"),
+                                      _class="item bookmark",
+                                      )
+                    bookmark["_data-c"] = "cms"
+                    bookmark["_data-f"] = "post"
+                    bookmark["_data-i"] = record_id
+                else:
+                    bookmark = ""
                 path = row._row["gis_location.path"]
                 if path:
                     L1 = path.split("/")[1]
@@ -446,17 +476,7 @@ class custom_WACOP(S3CRUD):
                                                                    ),
                                                                 _class="status-bar-left",
                                                                 ),
-                                                             UL(LI(A(A(ICON("bookmark"), # @ToDo: Different Icons for State?
-                                                                       # @ToDo: Tooltip?
-                                                                       #_title=T("Add Bookmark"),
-                                                                       #_title=T("Remove Bookmark"),
-                                                                       # @ToDo: Wire this up inc updating the icon?
-                                                                       #_id="alert-bookmark-%s" % record_id,
-                                                                       ),
-                                                                     _href="#",
-                                                                     ),
-                                                                   _class="item bookmark",
-                                                                   ),
+                                                             UL(bookmark,
                                                                 _class="controls",
                                                                 ),
                                                              # @ToDo: Allow user-visible string to be translated without affecting the style
@@ -511,8 +531,8 @@ class custom_WACOP(S3CRUD):
 
         tablename = "event_event"
         resource = s3db.resource(tablename)
-        # @ToDo: Just show Open Events?
-        #resource.add_filter(FS("~.closed") == False)
+        # Just show Open Events
+        resource.add_filter(FS("~.closed") == False)
 
         list_fields = ["id",
                        "name",
@@ -550,10 +570,24 @@ class custom_WACOP(S3CRUD):
                          _class="row well",
                          )
             itable = s3db.event_incident
-            iquery= (itable.deleted == False)
+            iquery = (itable.deleted == False)
             rtable = s3db.event_team
-            rquery= (rtable.deleted == False)
+            rquery = (rtable.deleted == False)
             gttable = s3db.gis_location_tag
+            auth = current.auth
+            if auth.is_logged_in():
+                logged_in = True
+                user_id = auth.user.id
+                etable = s3db.event_event
+                has_permission = auth.s3_has_permission
+                btable = s3db.event_bookmark
+                bquery = (btable.user_id == user_id) & \
+                         (btable.event_id.belongs([row["event_event.id"] for row in rows])) & \
+                         (btable.deleted == False)
+                bookmarks = db(bquery).select(btable.event_id)
+                bookmarks = [b.event_id for b in bookmarks]
+            else:
+                logged_in = False
             for row in rows:
                 record_id = row["event_event.id"]
                 incidents = db(iquery & (itable.event_id == record_id)).count()
@@ -581,6 +615,35 @@ class custom_WACOP(S3CRUD):
                                        )
                 else:
                     end_date = ""
+                if logged_in:
+                    if record_id in bookmarks:
+                        bookmark = LI(ICON("bookmark"),
+                                      _title=T("Remove Bookmark"),
+                                      _class="item bookmark",
+                                      )
+                    else:
+                        bookmark = LI(ICON("bookmark-empty"),
+                                      _title=T("Add Bookmark"),
+                                      _class="item bookmark",
+                                      )
+                    bookmark["_data-c"] = "event"
+                    bookmark["_data-f"] = "event"
+                    bookmark["_data-i"] = record_id
+                    if has_permission("update", etable, record_id):
+                        edit = LI(A(ICON("pencil"),
+                                    _href=URL(c="event", f="event",
+                                              args=["%s.popup" % record_id, "update"]
+                                              ),
+                                    _title=T("Edit Event"),
+                                    _class="s3_modal",
+                                    ),
+                                  _class="item edit",
+                                  )
+                    else:
+                        edit = ""
+                else:
+                    bookmark = ""
+                    edit = ""
                 path = row._row["gis_location.path"]
                 if path:
                     L1 = path.split("/")[1]
@@ -603,27 +666,13 @@ class custom_WACOP(S3CRUD):
                                                                    ),
                                                                 _class="status-bar-left",
                                                                 ),
-                                                             UL(LI(ICON("bookmark"), # @ToDo: Different Icons for State?
-                                                                   # @ToDo: Tooltip?
-                                                                   #_title=T("Add Bookmark"),
-                                                                   #_title=T("Remove Bookmark"),
-                                                                   # @ToDo: Wire this up inc updating the icon?
-                                                                   #_id="event-bookmark-%s" % record_id,
-                                                                   _class="item bookmark",
-                                                                   ),
-                                                                # @ToDo: Permissions?
-                                                                LI(ICON("edit"),
-                                                                   # @ToDo: Tooltip?
-                                                                   #_title=T("Edit"),
-                                                                   # @ToDo: Modal Edit?
-                                                                   #_id="event-edit-%s" % record_id,
-                                                                   _class="item edit",
-                                                                   ),
+                                                             UL(bookmark,
+                                                                edit,
                                                                 _class="controls",
                                                                 ),
                                                              _class="status-bar highlight",
                                                              ),
-                                               DIV(H1(row["event_event.title"],
+                                               DIV(H1(row["event_event.name"],
                                                       _class="title",
                                                       ),
                                                    DIV(DIV(SPAN(addr_street,
@@ -850,85 +899,18 @@ class custom_WACOP(S3CRUD):
 
         #  Create Form for Updates
         if updateable and auth.s3_has_permission("create", tablename):
-            # @ToDo: AJAX Form Submission
-
-            stable = db.cms_series
-            series = db(stable.deleted == False).select(stable.name,
-                                                        stable.id,
-                                                        )
-            select = SELECT(OPTION("Choose an update type…",
-                                   _disabled=True,
-                                   ),
-                            _id="cms_post_series_id",
-                            _name="series_id",
-                            )
-            for s in series:
-                # @ToDo: Option for T()
-                select.append(OPTION(s.name,
-                                     _value=s.id,
-                                     ))
-
-            #form = SQLFORM(ptable)
-            #hidden_fields = form.hidden_fields()
-            #custom = form.custom
-            #widgets = custom.widget
-            formname = "cms_post/create"
-            formkey = web2py_uuid()
-            keyname = "_formkey[%s]" % formname
-            session = current.session
-            session[keyname] = list(session.get(keyname, []))[-9:] + [formkey]
-            form = FORM(LABEL("Write new Update Post:",
-                              _for="body",
-                              ),
-                        TEXTAREA(_id="cms_post_body",
-                                 _name="body",
-                                 _placeholder="Write something…",
-                                 _rows="4",
-                                 ),
-                        DIV(DIV(select,
-                                _class="large-4 columns",
-                                ),
-                            DIV(INPUT(_id="cms_post_create_tags_input",
-                                      _class="hide",
-                                      _name="tags",
-                                      _type="text",
-                                      _value="",
-                                      ),
-                                UL(_id="cms_post_create_tags_ul",
-                                   ),
-                                _class="large-3 columns",
-                                ),
-                            DIV(INPUT(_type="submit",
-                                      _class="button tiny default right",
-                                      _value="Post Update",
-                                      ),
-                                _class="large-5 columns",
-                                ),
-                            _class="row",
-                            ),
-                        #hidden_fields, # Only needed for updates
-                        DIV(INPUT(_name="_formname",
-                                  _value=formname,
-                                  _type="hidden",
-                                  ),
-                            INPUT(_name="_formkey",
-                                  _value=formkey,
-                                  _type="hidden",
-                                  ),
-                            _style="display:none;",
-                            ),
-                        _class="form",
-                        action="#",
-                        enctype="multipart/form-data",
-                        method="post",
-                        )
-
-            form_div = DIV(form,
-                           _class="compose-update panel",
-                           )
-            output["create_post_form"] = form_div
+            output["create_post_button"] = DIV(A(ICON("add"),
+                                                 T("Add Update"),
+                                                 _href=URL(c="event", f="incident",
+                                                           args = [incident_id, "post", "create.popup"],
+                                                           vars={"refresh": "updates_datalist"},
+                                                           ),
+                                                 _class="s3_modal button wide radius",
+                                                 ),
+                                               _class="panel",
+                                               )
         else:
-            output["create_post_form"] = ""
+            output["create_post_button"] = ""
 
         # Tags for Updates
         s3 = current.response.s3
@@ -1255,20 +1237,23 @@ class incident_Profile(custom_WACOP):
                                       limitby=(0, 1)
                                       ).first()
             if exists:
-                bookmark_btn = A(ICON("bookmark"),
-                                 _title=T("Remove Bookmark"),
-                                 _id="incident-bookmark",
-                                 )
+                bookmark = A(ICON("bookmark"),
+                             _title=T("Remove Bookmark"),
+                             _class="item bookmark",
+                             )
             else:
-                bookmark_btn = A(ICON("bookmark-empty"),
-                                 _title=T("Add Bookmark"),
-                                 _id="incident-bookmark",
-                                 )
-            script = '''incident_bookmarks(%s)''' % incident_id
+                bookmark = A(ICON("bookmark-empty"),
+                             _title=T("Add Bookmark"),
+                             _class="item bookmark",
+                             )
+            bookmark["_data-c"] = "event"
+            bookmark["_data-f"] = "incident"
+            bookmark["_data-i"] = incident_id
+            script = '''wacop_bookmarks()'''
             s3.jquery_ready.append(script)
         else:
-            bookmark_btn = ""
-        output["bookmark_btn"] = bookmark_btn
+            bookmark = ""
+        output["bookmark_btn"] = bookmark
 
         # Is this Incident part of an Event?
         event_id = record.event_id
@@ -1815,7 +1800,7 @@ def cms_post_list_layout(list_id, item_id, resource, rfields, record):
                  LI(delete_btn,
                     _class="item",
                     ),
-                 _class="controls inline-list right",
+                 _class="controls",
                  )
 
     #if settings.get_cms_show_tags():
@@ -1846,12 +1831,12 @@ def cms_post_list_layout(list_id, item_id, resource, rfields, record):
                                            # post visibility
                                            # @ToDo: Read the visibility
                                            LI(T("Public"),
-                                              _class="item secondary border",
+                                              _class="item secondary border visibility",
                                               ),
-                                           _class="status-bar-left left inline-list"
+                                           _class="status-bar-left"
                                            ),
                                         toolbar,
-                                        _class="status-bar clearfix",
+                                        _class="status-bar",
                                         ),
                           DIV(P(TAG["TIME"](date),
                                 " by ",
@@ -1867,9 +1852,9 @@ def cms_post_list_layout(list_id, item_id, resource, rfields, record):
                               _class="dl-body",
                               ),
                           TAG["FOOTER"](tag_list,
-                                        _class="footer clearfix",
+                                        _class="footer",
                                         ),
-                          #_class="panel",
+                          _class="card-post",
                           _id=item_id,
                           )
 

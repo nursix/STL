@@ -266,6 +266,9 @@ class S3PersonEntity(S3Model):
                        dvi_identification = {"joinby": pe_id,
                                              "multiple": False,
                                              },
+                       # Tenures
+                       stdm_tenure_relationship = pe_id,
+
                        # Map Configs 'Saved Maps'
                        #   - Personalised configurations
                        #   - OU configurations (Organisation/Branch/Facility/Team)
@@ -1139,6 +1142,13 @@ class S3PersonModel(S3Model):
                                                 "type": 1,
                                                 },
                                             },
+                                           # National ID in particular
+                                           {"name": "national_id",
+                                            "joinby": "person_id",
+                                            "filterby": {
+                                                "type": 2,
+                                                },
+                                            },
                                            ),
                             # Personal Details
                             pr_person_details = {"joinby": "person_id",
@@ -1146,6 +1156,8 @@ class S3PersonModel(S3Model):
                                                  },
                             # Tags
                             pr_person_tag = "person_id",
+                            # Seized Items (owner)
+                            security_seized_item = "person_id",
                             )
 
         # ---------------------------------------------------------------------
@@ -3448,6 +3460,7 @@ class S3PersonImageModel(S3Model):
 
         T = current.T
         db = current.db
+        request = current.request
 
         # ---------------------------------------------------------------------
         # Image
@@ -3461,60 +3474,59 @@ class S3PersonImageModel(S3Model):
             9:T("other")
         }
 
-        tablename = "pr_image"
-        self.define_table(tablename,
-                          # Component not Instance
-                          self.super_link("pe_id", "pr_pentity"),
-                          Field("profile", "boolean",
-                                default = False,
-                                label = T("Profile Picture?"),
-                                represent = s3_yes_no_represent,
-                                ),
-                          Field("image", "upload",
-                                autodelete = True,
-                                length = current.MAX_FILENAME_LENGTH,
-                                represent = self.pr_image_represent,
-                                widget = S3ImageCropWidget((600, 600)),
-                                comment =  DIV(_class="tooltip",
-                                               _title="%s|%s" % (T("Image"),
-                                                                 T("Upload an image file here. If you don't upload an image file, then you must specify its location in the URL field.")))),
-                          Field("url",
-                                label = T("URL"),
-                                represent = pr_url_represent,
-                                comment = DIV(_class="tooltip",
-                                              _title="%s|%s" % (T("URL"),
-                                                                T("The URL of the image file. If you don't upload an image file, then you must specify its location here.")))),
-                          Field("type", "integer",
-                                default = 1,
-                                label = T("Image Type"),
-                                represent = lambda opt: \
-                                            pr_image_type_opts.get(opt,
-                                               current.messages.UNKNOWN_OPT),
-                                requires = IS_IN_SET(pr_image_type_opts,
-                                                     zero=None),
-                                ),
-                          s3_comments("description",
-                                      label=T("Description"),
-                                      comment = DIV(_class="tooltip",
-                                                    _title="%s|%s" % (T("Description"),
-                                                                      T("Give a brief description of the image, e.g. what can be seen where on the picture (optional).")))),
-                          *s3_meta_fields())
-
-        # @todo: make lazy_table
-        table = db[tablename]
-
-        def get_file():
+        def get_file(table):
             """ Callback to return the file field for our record """
-            if len(current.request.args) < 3:
+            if len(request.args) < 3:
                 return None
-            query = (table.id == current.request.args[2])
+            query = (table.id == request.args[2])
             record = db(query).select(table.image, limitby = (0, 1)).first()
             return record.image if record else None
 
-        # Can't be specified inline as needs callback to be defined, which needs table
-        table.image.requires = IS_PROCESSED_IMAGE("image", get_file,
-                                                  upload_path=os.path.join(current.request.folder,
-                                                                           "uploads"))
+        tablename = "pr_image"
+        self.define_table(tablename,
+          # Component not Instance
+          self.super_link("pe_id", "pr_pentity"),
+          Field("profile", "boolean",
+                default = False,
+                label = T("Profile Picture?"),
+                represent = s3_yes_no_represent,
+                ),
+          Field("image", "upload",
+                autodelete = True,
+                length = current.MAX_FILENAME_LENGTH,
+                represent = self.pr_image_represent,
+                widget = S3ImageCropWidget((600, 600)),
+                comment =  DIV(_class="tooltip",
+                               _title="%s|%s" % (T("Image"),
+                                                 T("Upload an image file here. If you don't upload an image file, then you must specify its location in the URL field.")))),
+          Field("url",
+                label = T("URL"),
+                represent = pr_url_represent,
+                comment = DIV(_class="tooltip",
+                              _title="%s|%s" % (T("URL"),
+                                                T("The URL of the image file. If you don't upload an image file, then you must specify its location here.")))),
+          Field("type", "integer",
+                default = 1,
+                label = T("Image Type"),
+                represent = lambda opt: \
+                            pr_image_type_opts.get(opt,
+                               current.messages.UNKNOWN_OPT),
+                requires = IS_IN_SET(pr_image_type_opts,
+                                     zero=None),
+                ),
+          s3_comments("description",
+                      label=T("Description"),
+                      comment = DIV(_class="tooltip",
+                                    _title="%s|%s" % (T("Description"),
+                                                      T("Give a brief description of the image, e.g. what can be seen where on the picture (optional).")))),
+          *s3_meta_fields(),
+          on_define = lambda table: [
+            table.image.set_attributes(requires = \
+                IS_PROCESSED_IMAGE("image", lambda table: get_file(table),
+                                    upload_path=os.path.join(request.folder,
+                                                             "uploads"))),
+            ]
+          )
 
         # CRUD Strings
         current.response.s3.crud_strings[tablename] = Storage(
@@ -4078,6 +4090,7 @@ class S3PersonDetailsModel(S3Model):
             4: T("separated"),
             5: T("divorced"),
             6: T("widowed"),
+            7: T("cohabiting"),
             9: T("other"),
         }
 
@@ -5674,7 +5687,7 @@ class pr_PersonEntityRepresent(S3Represent):
             label = pentity.pe_label \
                     if pentity.pe_label else self.default_label
         else:
-            label = None
+            label = ""
 
         item = object.__getattribute__(row, instance_type)
         if instance_type == "pr_person":
