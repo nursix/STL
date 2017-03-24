@@ -8469,6 +8469,13 @@ class S3ProjectTaskModel(S3Model):
                        project_time = "task_id",
                        # Comments (for imports))
                        project_comment = "task_id",
+                       # Shelter Inspections
+                       cr_shelter_inspection_flag = {"link": "cr_shelter_inspection_task",
+                                                     "joinby": "task_id",
+                                                     "key": "inspection_flag_id",
+                                                     "actuate": "link",
+                                                     "autodelete": False,
+                                                     }
                        )
 
         # ---------------------------------------------------------------------
@@ -8934,7 +8941,7 @@ class S3ProjectTaskModel(S3Model):
         s3db = current.s3db
 
         form_vars = form.vars
-        id = form_vars.id
+        task_id = form_vars.id
         record = form.record
 
         table = db.project_task
@@ -8967,30 +8974,32 @@ class S3ProjectTaskModel(S3Model):
             text = s3_auth_user_represent(current.auth.user.id)
             for var in changed:
                 text = "%s\n%s" % (text, changed[var])
-            table.insert(task_id=id,
-                         body=text)
+            table.insert(task_id = task_id,
+                         body = text,
+                         )
 
         post_vars = current.request.post_vars
         if "project_id" in post_vars:
             ltable = db.project_task_project
-            filter = (ltable.task_id == id)
+            filter = (ltable.task_id == task_id)
             project = post_vars.project_id
             if project:
                 # Create the link to the Project
                 #ptable = db.project_project
-                #master = s3db.resource("project_task", id=id)
+                #master = s3db.resource("project_task", id=task_id)
                 #record = db(ptable.id == project).select(ptable.id,
                 #                                         limitby=(0, 1)).first()
                 #link = s3db.resource("project_task_project")
                 #link_id = link.update_link(master, record)
-                query = (ltable.task_id == id) & \
+                query = (ltable.task_id == task_id) & \
                         (ltable.project_id == project)
                 record = db(query).select(ltable.id, limitby=(0, 1)).first()
                 if record:
                     link_id = record.id
                 else:
-                    link_id = ltable.insert(task_id = id,
-                                            project_id = project)
+                    link_id = ltable.insert(task_id = task_id,
+                                            project_id = project,
+                                            )
                 filter = filter & (ltable.id != link_id)
             # Remove any other links
             links = s3db.resource("project_task_project", filter=filter)
@@ -8998,24 +9007,25 @@ class S3ProjectTaskModel(S3Model):
 
         if "activity_id" in post_vars:
             ltable = db.project_task_activity
-            filter = (ltable.task_id == id)
+            filter = (ltable.task_id == task_id)
             activity = post_vars.activity_id
             if post_vars.activity_id:
                 # Create the link to the Activity
                 #atable = db.project_activity
-                #master = s3db.resource("project_task", id=id)
+                #master = s3db.resource("project_task", id=task_id)
                 #record = db(atable.id == activity).select(atable.id,
                 #                                          limitby=(0, 1)).first()
                 #link = s3db.resource("project_task_activity")
                 #link_id = link.update_link(master, record)
-                query = (ltable.task_id == id) & \
+                query = (ltable.task_id == task_id) & \
                         (ltable.activity_id == activity)
                 record = db(query).select(ltable.id, limitby=(0, 1)).first()
                 if record:
                     link_id = record.id
                 else:
-                    link_id = ltable.insert(task_id = id,
-                                            activity_id = activity)
+                    link_id = ltable.insert(task_id = task_id,
+                                            activity_id = activity,
+                                            )
                 filter = filter & (ltable.id != link_id)
             # Remove any other links
             links = s3db.resource("project_task_activity", filter=filter)
@@ -9023,24 +9033,25 @@ class S3ProjectTaskModel(S3Model):
 
         if "milestone_id" in post_vars:
             ltable = db.project_task_milestone
-            filter = (ltable.task_id == id)
+            filter = (ltable.task_id == task_id)
             milestone = post_vars.milestone_id
             if milestone:
                 # Create the link to the Milestone
                 #mtable = db.project_milestone
-                #master = s3db.resource("project_task", id=id)
+                #master = s3db.resource("project_task", id=task_id)
                 #record = db(mtable.id == milestone).select(mtable.id,
                 #                                           limitby=(0, 1)).first()
                 #link = s3db.resource("project_task_milestone")
                 #link_id = link.update_link(master, record)
-                query = (ltable.task_id == id) & \
+                query = (ltable.task_id == task_id) & \
                         (ltable.milestone_id == milestone)
                 record = db(query).select(ltable.id, limitby=(0, 1)).first()
                 if record:
                     link_id = record.id
                 else:
-                    link_id = ltable.insert(task_id = id,
-                                            milestone_id = milestone)
+                    link_id = ltable.insert(task_id = task_id,
+                                            milestone_id = milestone,
+                                            )
                 filter = filter & (ltable.id != link_id)
             # Remove any other links
             links = s3db.resource("project_task_milestone", filter=filter)
@@ -9048,6 +9059,10 @@ class S3ProjectTaskModel(S3Model):
 
         # Notify Assignee
         task_notify(form)
+
+        # Resolve shelter inspection flags linked to this task
+        if current.deployment_settings.get_cr_shelter_inspection_tasks():
+            s3db.cr_resolve_shelter_flags(task_id)
 
     # -------------------------------------------------------------------------
     @staticmethod
@@ -9480,18 +9495,34 @@ def task_notify(form):
         If the task is assigned to someone then notify them
     """
 
-    vars = form.vars
-    pe_id = vars.pe_id
+    formvars = form.vars
+    record = form.record
+
+    pe_id = formvars.pe_id
     if not pe_id:
+        # Not assigned to anyone
         return
+
     user = current.auth.user
     if user and user.pe_id == pe_id:
         # Don't notify the user when they assign themselves tasks
         return
-    if int(vars.status) not in current.response.s3.project_task_active_statuses:
+
+    status = formvars.status
+    if status is not None:
+        status = int(status)
+    else:
+        if record and "status" in record:
+            status = record.status
+        else:
+            table = current.s3db.project_task
+            status = table.status.default
+
+    if status not in current.response.s3.project_task_active_statuses:
         # No need to notify about closed tasks
         return
-    if form.record is None or (int(pe_id) != form.record.pe_id):
+
+    if record is None or (int(pe_id) != record.pe_id):
         # Assignee has changed
         settings = current.deployment_settings
 
@@ -9499,15 +9530,21 @@ def task_notify(form):
             # Notify assignee
             subject = "%s: Task assigned to you" % settings.get_system_name_short()
             url = "%s%s" % (settings.get_base_public_url(),
-                            URL(c="project", f="task", args=vars.id))
-            priority = current.s3db.project_task.priority.represent(int(vars.priority))
+                            URL(c="project", f="task", args=[formvars.id]))
+
+            priority = formvars.priority
+            if priority is not None:
+                priority = current.s3db.project_task.priority.represent(int(priority))
+            else:
+                priority = "unknown"
+
             message = "You have been assigned a Task:\n\n%s\n\n%s\n\n%s\n\n%s" % \
-                (url,
-                 "%s priority" % priority,
-                 vars.name,
-                 vars.description or "")
+                            (url,
+                             "%s priority" % priority,
+                             formvars.name,
+                             formvars.description or "")
+
             current.msg.send_by_pe_id(pe_id, subject, message)
-    return
 
 # =============================================================================
 class project_TaskRepresent(S3Represent):
