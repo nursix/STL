@@ -119,6 +119,11 @@ def config(settings):
     settings.cms.hide_index = True
 
     # -------------------------------------------------------------------------
+    # Human Resource Module Settings
+    #
+    settings.hrm.teams_orgs = False
+
+    # -------------------------------------------------------------------------
     # Inventory Module Settings
     #
     settings.inv.facility_label = "Facility"
@@ -159,6 +164,7 @@ def config(settings):
                                          }
 
     settings.project.task_time = False
+    settings.project.my_tasks_include_team_tasks = True
 
     # -------------------------------------------------------------------------
     # Requests Module Settings
@@ -1042,6 +1048,13 @@ def config(settings):
                 # Restricted view for Security staff
                 if r.component:
                     redirect(r.url(method=""))
+
+                # Autocomplete using alternative search method
+                search_fields = ("first_name", "last_name", "pe_label")
+                s3db.set_method("pr", "person",
+                                method = "search_ac",
+                                action = s3db.pr_PersonSearchAutocomplete(search_fields),
+                                )
 
                 current.deployment_settings.ui.export_formats = None
 
@@ -2740,17 +2753,25 @@ def config(settings):
         ptable = s3db.pr_person
         query = (htable.deleted == False) & \
                 (htable.person_id == ptable.id)
-        hrs = db(query).select(ptable.pe_id)
-        hrs = [hr.pe_id for hr in hrs]
+        rows = db(query).select(ptable.pe_id)
+        pe_ids = set(row.pe_id for row in rows)
+
+        # ...and teams
+        gtable = s3db.pr_group
+        query = (gtable.group_type == 3) & \
+                (gtable.deleted == False)
+        rows = db(query).select(gtable.pe_id)
+        pe_ids |= set(row.pe_id for row in rows)
 
         from gluon import IS_EMPTY_OR
         s3db.project_task.pe_id.requires = IS_EMPTY_OR(
             IS_ONE_OF(db, "pr_pentity.pe_id",
                       s3db.pr_PersonEntityRepresent(show_label = False,
-                                                    show_type = False),
-                      sort=True,
+                                                    show_type = True,
+                                                    ),
+                      sort = True,
                       filterby = "pe_id",
-                      filter_opts = hrs,
+                      filter_opts = pe_ids,
                       ))
 
     settings.customise_project_task_resource = customise_project_task_resource
@@ -2762,6 +2783,9 @@ def config(settings):
         """
 
         table = current.s3db.security_seized_item
+
+        field = table.person_id
+        field.comment = T("Enter some characters of the ID or name to start the search, then select from the drop-down")
 
         # Can't add item type from item form
         field = table.item_type_id

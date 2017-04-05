@@ -224,24 +224,74 @@ class S3SQLForm(object):
 
     # -------------------------------------------------------------------------
     @staticmethod
-    def _insert_subheadings(form, tablename, subheadings):
+    def _insert_subheadings(form, tablename, formstyle, subheadings):
         """
             Insert subheadings into forms
 
             @param form: the form
             @param tablename: the tablename
-            @param subheadings: a dict of {"Headline": Fieldnames}, where
-                Fieldname can be either a single field name or a list/tuple
-                of field names belonging under that headline
+            @param formstyle: the formstyle
+            @param subheadings:
+                OLD (maintained for backwards compatibility):
+                    a dict of {"Header": Fieldnames}, where
+                        Fieldname can be either a single field name or
+                        a list/tuple of field names belonging under that header
+                NEW (allows for multiple levels, used by DC):
+                    a dict of {"Header": {"fields": Fieldnames,
+                                          "subheadings": {"Header": {"fields": Fieldnames,
+                                                                     "subheadings": etc,
+                                                                     },
+                                                          },
+                                          },
+                               }
         """
 
         if subheadings:
             if tablename in subheadings:
                 subheadings = subheadings.get(tablename)
+            if formstyle.__name__ in ("formstyle_table",
+                                      "formstyle_table_inline",
+                                      ):
+                def create_subheading(represent, tablename, f):
+                    return TR(TD(represent, _colspan=3,
+                                 _class="subheading",
+                                 ),
+                              _class = "subheading",
+                              _id = "%s_%s__subheading" % (tablename, f),
+                              )
+            else:
+                def create_subheading(represent, tablename, f):
+                    return DIV(represent,
+                               _class = "subheading",
+                               _id = "%s_%s__subheading" % (tablename, f),
+                               )
+            if "fields" in subheadings[subheadings.items()[0][0]]:
+                new_style = True
+                done = {1: [],
+                        2: [],
+                        3: [],
+                        }
+                fields = {}
+                for k, v in subheadings.items():
+                    for f in v["fields"]:
+                        fields[f] = {1: k}
+                    for _k, _v in v["subheadings"].items():
+                        for f in _v["fields"]:
+                            fields[f] = {1: k,
+                                         2: _k,
+                                         }
+                        for __k, __v in _v["subheadings"].items():
+                            for f in __v["fields"]:
+                                fields[f] = {1: k,
+                                             2: _k,
+                                             3: __k,
+                                             }
+            else:
+                new_style = False
+                done = []
             form_rows = iter(form[0])
             tr = form_rows.next()
             i = 0
-            done = []
             while tr:
                 # @ToDo: We need a better way of working than this!
                 f = tr.attributes.get("_id", None)
@@ -272,27 +322,52 @@ class S3SQLForm(object):
                     elif f.startswith("sub_"):
                         # S3GroupedOptionsWidget
                         f = f[4:]
-                    for k in subheadings.keys():
-                        if k in done:
-                            continue
-                        fields = subheadings[k]
-                        if not isinstance(fields, (list, tuple)):
-                            fields = [fields]
-                        if f in fields:
-                            done.append(k)
-                            if isinstance(k, int):
-                                # Don't display a section title
-                                represent = ""
+                    if new_style:
+                        headings = fields.get(f)
+                        if not headings:
+                            try:
+                                tr = form_rows.next()
+                            except StopIteration:
+                                break
                             else:
-                                represent = k
-                            form[0].insert(i, TR(TD(represent, _colspan=3,
-                                                    _class="subheading"),
-                                                 _class = "subheading",
-                                                 _id = "%s_%s__subheading" %
-                                                       (tablename, f)))
+                                i += 1
+                            continue
+                        inserted = 0
+                        for j in (1, 2, 3):
+                            heading = headings.get(j)
+                            if heading and heading not in done[j]:
+                                done[j].append(heading)
+                                if j in (1, 2):
+                                    # Clear lower level to avoid cross-section dupes
+                                    done[j + 1] = []
+                                subheading = create_subheading(heading, tablename, f)
+                                form[0].insert(i, subheading)
+                                i += 1
+                                inserted += 1
+                        if inserted:
                             tr.attributes.update(_class="%s after_subheading" % tr.attributes["_class"])
-                            tr = form_rows.next()
-                            i += 1
+                            for _i in range(0, inserted):
+                                # Iterate over the rows we just created
+                                tr = form_rows.next()
+                    else:
+                        for k in subheadings.keys():
+                            if k in done:
+                                continue
+                            fields = subheadings[k]
+                            if not isinstance(fields, (list, tuple)):
+                                fields = [fields]
+                            if f in fields:
+                                done.append(k)
+                                if isinstance(k, int):
+                                    # Don't display a section title
+                                    represent = ""
+                                else:
+                                    represent = k
+                                subheading = create_subheading(represent, tablename, f)
+                                form[0].insert(i, subheading)
+                                tr.attributes.update(_class="%s after_subheading" % tr.attributes["_class"])
+                                tr = form_rows.next()
+                                i += 1
                 try:
                     tr = form_rows.next()
                 except StopIteration:
@@ -426,7 +501,7 @@ class S3SQLDefaultForm(S3SQLForm):
         # Subheadings
         subheadings = options.get("subheadings", None)
         if subheadings:
-            self._insert_subheadings(form, tablename, subheadings)
+            self._insert_subheadings(form, tablename, formstyle, subheadings)
 
         # Process the form
         logged = False
@@ -1060,7 +1135,7 @@ class S3SQLCustomForm(S3SQLForm):
         # Subheadings
         subheadings = options.get("subheadings", None)
         if subheadings:
-            self._insert_subheadings(form, tablename, subheadings)
+            self._insert_subheadings(form, tablename, formstyle, subheadings)
 
         # Process the form
         formname = "%s/%s" % (tablename, record_id)
@@ -1643,45 +1718,46 @@ class S3SQLField(S3SQLFormElement):
 
         rfield = S3ResourceField(resource, self.selector)
 
-        components = resource.components
-        subtables = {}
-        if components:
-            for alias, component in components.items():
-                if component.multiple:
-                    continue
-                if component._alias:
-                    tablename = component._alias
-                else:
-                    tablename = component.tablename
-                subtables[tablename] = alias
+        field = rfield.field
+        if field is None:
+            raise SyntaxError("Invalid selector: %s" % self.selector)
 
         tname = rfield.tname
-        if rfield.field is not None:
 
-            field = rfield.field
+        options = self.options
+        label = options.get("label", DEFAULT)
+        widget = options.get("widget", DEFAULT)
 
-            options = self.options
-            label = options.get("label", DEFAULT)
-            widget = options.get("widget", DEFAULT)
+        if resource._alias:
+            tablename = resource._alias
+        else:
+            tablename = resource.tablename
 
+        if tname == tablename:
             # Field in the main table
-            if resource._alias:
-                tablename = resource._alias
-            else:
-                tablename = resource.tablename
-            if tname == tablename:
-                field = rfield.field
 
-                if label is not DEFAULT:
-                    field.label = label
-                if widget is not DEFAULT:
-                    field.widget = widget
+            if label is not DEFAULT:
+                field.label = label
+            if widget is not DEFAULT:
+                field.widget = widget
 
-                return None, field.name, field
+            return None, field.name, field
 
-            # Field in a subtable (= single-record-component)
-            elif tname in subtables:
-                field = rfield.field
+        else:
+            components = resource.components
+            subtables = {}
+            if components:
+                for alias, component in components.items():
+                    if component.multiple:
+                        continue
+                    if component._alias:
+                        tablename = component._alias
+                    else:
+                        tablename = component.tablename
+                    subtables[tablename] = alias
+
+            if tname in subtables:
+                # Field in a subtable (= single-record-component)
 
                 alias = subtables[tname]
                 name = "sub_%s_%s" % (alias, rfield.fname)
@@ -1691,11 +1767,10 @@ class S3SQLField(S3SQLFormElement):
                                                    label = label,
                                                    widget = widget,
                                                    )
+
                 return alias, field.name, renamed_field
-            else:
-                raise SyntaxError("Invalid subtable: %s" % tname)
-        else:
-            raise SyntaxError("Invalid selector: %s" % self.selector)
+
+            raise SyntaxError("Invalid subtable: %s" % tname)
 
 # =============================================================================
 class S3SQLSubForm(S3SQLFormElement):
@@ -3753,10 +3828,14 @@ class S3SQLInlineLink(S3SQLInlineComponent):
         labels.sort()
 
         if self.options.get("render_list"):
-            # Render as HTML list
-            return UL([LI(l) for l in labels],
-                      _class = "s3-inline-link",
-                      )
+            if value is None or value == [None]:
+                # Don't render as list if empty
+                return current.messages.NONE
+            else:
+                # Render as HTML list
+                return UL([LI(l) for l in labels],
+                          _class = "s3-inline-link",
+                          )
         else:
             # Render as comma-separated list of strings
             # (using TAG rather than join() to support HTML labels)

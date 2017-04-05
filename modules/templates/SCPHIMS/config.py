@@ -228,8 +228,9 @@ def config(settings):
 
         # Always at L3
         from s3 import S3LocationSelector
-        table.location_id.widget = S3LocationSelector(levels=("L1", "L2", "L3"),
-                                                      show_map=False)
+        table.location_id.widget = S3LocationSelector(levels = ("L1", "L2", "L3"),
+                                                      show_map = False,
+                                                      )
 
         has_role = current.auth.s3_has_role
         if has_role("ERT_LEADER") or has_role("HUM_MANAGER"):
@@ -271,7 +272,9 @@ def config(settings):
 
         # Always at L4
         from s3 import S3LocationSelector
-        table.location_id.widget = S3LocationSelector(levels=("L1", "L2", "L3", "L4"))
+        table.location_id.widget = S3LocationSelector(levels = ("L1", "L2", "L3", "L4"),
+                                                      show_map = False,
+                                                      )
 
         # Always SC
         otable = s3db.org_organisation
@@ -307,23 +310,39 @@ def config(settings):
     # -------------------------------------------------------------------------
     def customise_dc_response_controller(**attr):
 
-        # When creating Assessments from Assessments module, include the Event field
-        from s3 import S3SQLCustomForm, S3SQLInlineLink
-        crud_form = S3SQLCustomForm(S3SQLInlineLink("event",
-                                                    label = T("Disaster"),
-                                                    field = "event_id",
-                                                    multiple = False,
-                                                    ),
-                                    "template_id",
-                                    "date",
-                                    "location_id",
-                                    "person_id",
-                                    "comments",
-                                    )
+        s3 = current.response.s3
+        standard_prep = s3.prep
+        def custom_prep(r):
+            # Call standard prep
+            if callable(standard_prep):
+                if not standard_prep(r):
+                    return False
 
-        current.s3db.configure("dc_response",
-                               crud_form = crud_form,
-                               )
+            if not r.component:
+                # When creating Assessments from Assessments module, include the Event field
+                from s3 import S3SQLCustomForm, S3SQLInlineLink
+                crud_form = S3SQLCustomForm(S3SQLInlineLink("event",
+                                                            label = T("Disaster"),
+                                                            field = "event_id",
+                                                            multiple = False,
+                                                            ),
+                                            "template_id",
+                                            "date",
+                                            "location_id",
+                                            "person_id",
+                                            "comments",
+                                            )
+
+                current.s3db.configure("dc_response",
+                                       crud_form = crud_form,
+                                       )
+
+            elif r.component_name == "answer":
+                current.s3db.event_event.start_date.label = T("Date the Event Occurred")
+                # @ToDo: Default the pre-event Demographiocs data
+
+            return True
+        s3.prep = custom_prep
 
         return attr
 
