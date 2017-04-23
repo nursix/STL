@@ -5,7 +5,7 @@
 # STL Template Version 2.1.3 => 2.1.4
 #
 # Execute in web2py folder after code upgrade like:
-# python web2py.py -S eden -M -R applications/eden/modules/templates/STL/upgrade/2.0.6-2.1.0.py
+# python web2py.py -S eden -M -R applications/eden/modules/templates/STL/upgrade/2.1.3-2.1.4.py
 #
 #import datetime
 import sys
