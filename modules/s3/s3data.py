@@ -88,17 +88,17 @@ class S3DataTable(object):
         self.colnames = colnames
         self.heading = heading
 
-        max = len(data)
+        data_len = len(data)
         if start < 0:
             start = 0
-        if start > max:
-            start = max
+        if start > data_len:
+            start = data_len
         if limit == None:
-            end = max
+            end = data_len
         else:
             end = start + limit
-            if end > max:
-                end = max
+            if end > data_len:
+                end = data_len
         self.start = start
         self.end = end
         self.filterString = filterString
@@ -798,7 +798,7 @@ class S3DataTable(object):
     def table(self, id, flist=None, action_col=0):
         """
             Method to render the data as an html table. This is of use if
-            and html table is required without the dataTable goodness. However
+            an html table is required without the dataTable goodness. However
             if you want html for a dataTable then use the html() method
 
             @param id: The id of the table
@@ -918,7 +918,10 @@ class S3DataTable(object):
 
 # =============================================================================
 class S3DataList(object):
-    """ Class representing a data list """
+    """
+        Class representing a list of data cards
+        -clien-side implementation in static/scripts/S3/s3.dataLists.js
+    """
 
     # -------------------------------------------------------------------------
     # Standard API
@@ -988,6 +991,7 @@ class S3DataList(object):
             @param pagesize: maximum number of items per page
             @param rowsize: number of items per row
             @param ajaxurl: the URL to Ajax-update the datalist
+            @param empty: message to display if the list is empty
             @param popup_url: the URL for the modal used for the 'more'
                               button (=> we deactivate InfiniteScroll)
             @param popup_title: the title for the modal

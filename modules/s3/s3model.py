@@ -31,11 +31,13 @@ __all__ = ("S3Model",
            #"S3DynamicModel",
            )
 
+from collections import OrderedDict
+
 from gluon import *
 # Here are dependencies listed for reference:
 #from gluon import current
 #from gluon.dal import Field
-#from gluon.validators import IS_EMPTY_OR, IS_NOT_EMPTY
+#from gluon.validators import IS_EMPTY_OR, IS_IN_SET, IS_NOT_EMPTY
 from gluon.storage import Storage
 from gluon.tools import callback
 
@@ -345,7 +347,7 @@ class S3Model(object):
         # Define sessions table
         if current.deployment_settings.get_base_session_db():
             # Copied from https://github.com/web2py/web2py/blob/master/gluon/globals.py#L895
-            # Not DRY, bit no easy way to make it so
+            # Not DRY, but no easy way to make it so
             current.db.define_table("web2py_session",
                                     Field("locked", "boolean", default=False),
                                     Field("client_ip", length=64),
@@ -1651,11 +1653,12 @@ class S3DynamicModel(object):
             requires = field.requires
 
             # Handle require_not_empty
-            if row.require_not_empty and fieldtype != "boolean":
-                if not requires:
-                    requires = IS_NOT_EMPTY()
-            elif requires:
-                requires = IS_EMPTY_OR(requires)
+            if fieldtype != "boolean":
+                if row.require_not_empty:
+                    if not requires:
+                        requires = IS_NOT_EMPTY()
+                elif requires:
+                    requires = IS_EMPTY_OR(requires)
 
             field.requires = requires
 
@@ -1769,6 +1772,15 @@ class S3DynamicModel(object):
         else:
             default = None
 
+        # Widget?
+        #widget = settings.get("widget")
+        #if widget == "radio":
+        len_options = len(options)
+        if len_options < 4:
+            widget = lambda field, value: SQLFORM.widgets.radio.widget(field, value, cols=len_options)
+        else:
+            widget = None
+
         from s3fields import S3Represent
         field = Field(fieldname, fieldtype,
                       default = default,
@@ -1778,7 +1790,8 @@ class S3DynamicModel(object):
                       requires = IS_IN_SET(options,
                                            sort = sort,
                                            zero = zero,
-                                           )
+                                           ),
+                      widget = widget,
                       )
         return field
 
@@ -1966,17 +1979,59 @@ class S3DynamicModel(object):
         fieldtype = row.field_type
 
         default = row.default_value
-        if default and default.lower() == "true":
-            default = True
+        if default:
+            default = default.lower()
+            if default == "true":
+                default = True
+            elif default == "none":
+                default = None
+            else:
+                default = False
         else:
             default = False
+
+        settings = row.settings or {}
+
+        # NB no IS_EMPTY_OR for boolean-fields:
+        # => NULL values in SQL are neither True nor False, so always
+        #    require special handling; to prevent that, we remove the
+        #    default IS_EMPTY_OR and always set a default
+        # => DAL converts everything that isn't True to False anyway,
+        #    so accepting an empty selection would create an
+        #    implicit default with no visible feedback (poor UX)
+
+        widget = settings.get("widget")
+        if widget == "radio":
+            # Render two radio-buttons Yes|No
+            T = current.T
+            requires = [IS_IN_SET(OrderedDict([(True, T("Yes")),
+                                               (False, T("No")),
+                                               ]),
+                                  # better than "Value not allowed"
+                                  error_message = T("Please select a value"),
+                                  ),
+                        # Form option comes in as str
+                        # => convert to boolean
+                        lambda v: (str(v) == "True", None),
+                        ]
+            widget = lambda field, value: \
+                     SQLFORM.widgets.radio.widget(field, value, cols=2)
+        else:
+            # Remove default IS_EMPTY_OR
+            requires = None
+
+            # Default single checkbox widget
+            widget = None
 
         from s3utils import s3_yes_no_represent
         field = Field(fieldname, fieldtype,
                       default = default,
                       represent = s3_yes_no_represent,
-                      requires = None,
+                      requires = requires,
                       )
+
+        if widget:
+            field.widget = widget
 
         return field
 

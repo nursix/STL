@@ -220,6 +220,10 @@ class S3DynamicTablesModel(S3Model):
                            label = T("Expose mobile form"),
                            default = True,
                            ),
+                     Field("mobile_data", "boolean",
+                           label = T("Expose data for mobile clients"),
+                           default = False,
+                           ),
                      #s3_comments(),
                      *s3_meta_fields())
 
@@ -260,7 +264,6 @@ class S3DynamicTablesModel(S3Model):
         tablename = "s3_field"
         define_table(tablename,
                      table_id(empty = False,
-                              notnull = True,
                               ondelete = "CASCADE",
                               ),
                      Field("label",

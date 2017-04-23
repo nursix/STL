@@ -24,6 +24,8 @@ def config(settings):
     # Theme (folder to use for views/layout.html)
     settings.base.theme = "WACOP"
 
+    settings.ui.social_buttons = True
+
     # -------------------------------------------------------------------------
     # Self-Registration and User Profile
     #
@@ -225,22 +227,116 @@ def config(settings):
     settings.cms.show_tags = True
 
     # -------------------------------------------------------------------------
+    def cms_post_onaccept(form):
+        """
+            Handle Tags in Create / Update forms
+        """
+
+        post_id = form.vars.id
+
+        db = current.db
+        s3db = current.s3db
+        ttable = s3db.cms_tag
+        ltable = s3db.cms_tag_post
+
+        # Delete all existing tags for this post
+        db(ltable.post_id == post_id).delete()
+
+        # Add these tags
+        tags = current.request.post_vars.get("tags")
+        if not tags:
+            return
+
+        tags = tags.split(",")
+        tag_ids = db(ttable.name.belongs(tags)).select(ttable.id,
+                                                       ttable.name).as_dict(key="name")
+        for tag in tags:
+            row = tag_ids.get("tag")
+            if row:
+                tag_id = row.get("id")
+            else:
+                tag_id = ttable.insert(name=tag)
+            ltable.insert(post_id = post_id,
+                          tag_id = tag_id,
+                          )
+
+    # -------------------------------------------------------------------------
     def customise_cms_post_resource(r, tablename):
 
-        s3db = current.s3db
-        table = s3db.cms_post
-
         from s3 import S3SQLCustomForm, S3SQLInlineComponent
-        crud_form = S3SQLCustomForm((T("Text"), "body"),
-                                    # @ToDo: Tags widget
-                                    S3SQLInlineComponent("tag_post",
-                                                         fields = [("", "tag_id")],
-                                                         label = T("Tags"),
-                                                         ),
+
+        db = current.db
+        s3db = current.s3db
+        table = s3db.cms_post                      
+        table.priority.readable = table.priority.writable = True
+        table.series_id.readable = table.series_id.writable = True
+        table.status_id.readable = table.status_id.writable = True
+
+        crud_fields = [(T("Type"), "series_id"),
+                       (T("Priority"), "priority"),
+                       (T("Status"), "status_id"),
+                       (T("Title"), "title"),
+                       (T("Text"), "body"),
+                       (T("Location"), "location_id"),
+                       # Tags are added client-side
+                       ]
+
+        if r.tablename != "event_incident":
+            if r.tablename == "event_event" and r.method != "validate": # Validate comes in with no r.id!
+                from gluon import IS_EMPTY_OR
+                from s3 import IS_ONE_OF
+                itable = s3db.event_incident
+                query = (itable.event_id == r.id) & \
+                        (itable.closed == False) & \
+                        (itable.deleted == False)
+                set = db(query)
+                f = s3db.event_post.incident_id
+                f.requires = IS_EMPTY_OR(
+                                IS_ONE_OF(set, "event_incident.id",
+                                          f.represent,
+                                          orderby="event_incident.name",
+                                          sort=True))
+            crud_fields.insert(0, S3SQLInlineComponent("incident_post",
+                                                       fields = [("", "incident_id")],
+                                                       label = T("Incident"),
+                                                       multiple = False,
+                                                       ))
+
+        crud_form = S3SQLCustomForm(*crud_fields
                                     )
+
+        # Client support for Tags
+        appname = r.application
+        s3 = current.response.s3
+        scripts_append = s3.scripts.append
+        if s3.debug:
+            scripts_append("/%s/static/scripts/tag-it.js" % appname)
+        else:
+            scripts_append("/%s/static/scripts/tag-it.min.js" % appname)
+        scripts_append("/%s/static/themes/WACOP/js/update_tags.js" % appname)
+        if r.method == "create":
+            s3.jquery_ready.append('''wacop_update_tags("")''')
+        elif r.method == "update":
+            ttable = s3db.cms_tag
+            ltable = s3db.cms_tag_post
+            if r.tablename == "cms_post":
+                post_id = r.id
+            else:
+                post_id = r.component.id
+            query = (ltable.post_id == post_id) & \
+                    (ltable.tag_id == ttable.id)
+            tags = db(query).select(ttable.name)
+            tags = [tag.name for tag in tags]
+            tags = ",".join(tags)
+            s3.jquery_ready.append('''wacop_update_tags("%s")''' % tags)
+
+        # Processing Tags
+        default = s3db.get_config(tablename, "onaccept")
+        onaccept = [default, cms_post_onaccept]
 
         s3db.configure(tablename,
                        crud_form = crud_form,
+                       onaccept = onaccept,
                        )
 
     settings.customise_cms_post_resource = customise_cms_post_resource
@@ -270,10 +366,17 @@ def config(settings):
                             #                  },
                             )
 
+        # Custom Browse
+        from templates.WACOP.controllers import event_Browse, event_Profile
+        set_method = s3db.set_method
+        set_method("event", "event",
+                   method = "browse",
+                   action = event_Browse)
+
         # Custom Profile
-        #s3db.set_method("event", "event",
-        #                method = "custom",
-        #                action = event_Profile)
+        set_method("event", "event",
+                   method = "custom",
+                   action = event_Profile)
 
         # Custom prep
         standard_prep = s3.prep
@@ -282,36 +385,74 @@ def config(settings):
             if callable(standard_prep):
                 result = standard_prep(r)
 
-            if r.representation == "popup":
-                cname = r.component_name
-                if cname:
-                    # Popups for lists in Parent Event of Incident Screen
-                    # No Title since this is on the Popup
-                    s3.crud_strings["event_event"].title_display = ""
-                    # No create button & Tweak list_fields
-                    if cname == "incident":
-                        list_fields = ["date",
-                                       "name",
-                                       "incident_type_id",
-                                       ]
-                    elif cname == "team":
-                        list_fields = ["incident_id",
-                                       "group_id",
-                                       "status_id",
-                                       ]
-                    elif cname == "post":
-                        list_fields = ["date",
-                                       "series_id",
-                                       "priority",
-                                       "status_id",
-                                       "body",
-                                       ]
-                    else:
-                        # Shouldn't get here but want to avoid crashes
-                        list_fields = []
-                    r.component.configure(insertable = False,
-                                          list_fields = list_fields,
-                                          )
+            cname = r.component_name
+            if not cname:
+                f = s3db.event_event.event_type_id
+                f.readable = f.writable = False
+
+            elif cname == "task":
+                from gluon import IS_EMPTY_OR
+                from s3 import IS_ONE_OF, S3SQLCustomForm, S3SQLInlineComponent
+                itable = s3db.event_incident
+                query = (itable.event_id == r.id) & \
+                        (itable.closed == False) & \
+                        (itable.deleted == False)
+                set = current.db(query)
+                f = s3db.event_task.incident_id
+                f.requires = IS_EMPTY_OR(
+                                IS_ONE_OF(set, "event_incident.id",
+                                          f.represent,
+                                          orderby="event_incident.name",
+                                          sort=True))
+                crud_form = S3SQLCustomForm(
+                    S3SQLInlineComponent("incident",
+                                         fields = [("", "incident_id")],
+                                         label = T("Incident"),
+                                         multiple = False,
+                                         filterby = dict(field = "event_id",
+                                                         options = r.id,
+                                                         )
+                                         ),
+                    "name",
+                    "description",
+                    "source",
+                    "priority",
+                    "pe_id",
+                    "date_due",
+                    "status",
+                    "comments",
+                    )
+                r.component.configure(crud_form = crud_form,
+                                      )
+                
+            elif r.representation == "popup" and r.get_vars.get("view"):
+                # Popups for lists in Parent Event of Incident Screen or Event Profile header
+                # No Title since this is on the Popup
+                s3.crud_strings["event_event"].title_display = ""
+                # No create button & Tweak list_fields
+                if cname == "incident":
+                    list_fields = ["date",
+                                   "name",
+                                   "incident_type_id",
+                                   ]
+                elif cname == "group":
+                    list_fields = ["incident_id",
+                                   "group_id",
+                                   "status_id",
+                                   ]
+                elif cname == "post":
+                    list_fields = ["date",
+                                   "series_id",
+                                   "priority",
+                                   "status_id",
+                                   "body",
+                                   ]
+                else:
+                    # Shouldn't get here but want to avoid crashes
+                    list_fields = []
+                r.component.configure(insertable = False,
+                                      list_fields = list_fields,
+                                      )
 
             return True
         s3.prep = custom_prep
@@ -334,25 +475,29 @@ def config(settings):
         # Load normal model to be able to override configuration
         table = s3db.event_incident
 
-        def status_represent(value):
-            " Represent the closed field as Status Open/Closed instead of True/False "
-
-            if value is True:
-                return T("Closed")
-            elif value is False:
-                return T("Open")
-            else:
-                return current.messages["NONE"]
-
-        table.closed.label = T("Status")
-        table.closed.represent = status_represent
+        #def status_represent(value):
+        #    " Represent the closed field as Status Open/Closed instead of True/False "
+        #    if value is True:
+        #        return T("Closed")
+        #    elif value is False:
+        #        return T("Open")
+        #    else:
+        #        return current.messages["NONE"]
+        #table.closed.label = T("Status")
+        #table.closed.represent = status_represent
         table.event_id.readable = table.event_id.writable = True
 
+        # Custom Browse
+        from templates.WACOP.controllers import incident_Browse, incident_Profile
+        set_method = s3db.set_method
+        set_method("event", "incident",
+                   method = "browse",
+                   action = incident_Browse)
+
         # Custom Profile
-        from templates.WACOP.controllers import incident_Profile
-        s3db.set_method("event", "incident",
-                        method = "custom",
-                        action = incident_Profile)
+        set_method("event", "incident",
+                   method = "custom",
+                   action = incident_Profile)
 
         #s3.crud_strings["event_incident"].title_list =  T("Browse Incidents")
 
@@ -363,111 +508,121 @@ def config(settings):
             if callable(standard_prep):
                 result = standard_prep(r)
 
-            if r.method == "summary":
-                # Map (only) in common area
-                settings.ui.summary = ({"name": "table",
-                                        "label": "Table",
-                                        "widgets": [{"method": "datatable"}]
-                                        },
-                                       {"name": "charts",
-                                        "label": "Report",
-                                        "widgets": [{"method": "report",
-                                                     "ajax_init": True}]
-                                        },
-                                       {"common": True,
-                                        "name": "map",
-                                        "label": "Map",
-                                        "widgets": [{"method": "map",
-                                                     "ajax_init": True}],
-                                        },
-                                       )
+            #if r.method == "summary":
+            #    # Map (only) in common area
+            #    settings.ui.summary = ({"name": "table",
+            #                            "label": "Table",
+            #                            "widgets": [{"method": "datatable"}]
+            #                            },
+            #                           {"name": "charts",
+            #                            "label": "Report",
+            #                            "widgets": [{"method": "report",
+            #                                         "ajax_init": True}]
+            #                            },
+            #                           {"common": True,
+            #                            "name": "map",
+            #                            "label": "Map",
+            #                            "widgets": [{"method": "map",
+            #                                         "ajax_init": True}],
+            #                            },
+            #                           )
 
-                from s3 import S3DateFilter, S3OptionsFilter, S3TextFilter
-                from templates.WACOP.controllers import filter_formstyle_summary, text_filter_formstyle
+            #    from s3 import S3DateFilter, S3OptionsFilter, S3TextFilter
+            #    from templates.WACOP.controllers import filter_formstyle_summary, text_filter_formstyle
 
-                # @ToDo: This should use date/end_date not just date
-                date_filter = S3DateFilter("date",
-                                           #formstyle = filter_formstyle_summary,
-                                           label = "",
-                                           #hide_time = True,
-                                           )
-                date_filter.input_labels = {"ge": "Start Time/Date", "le": "End Time/Date"}
+            #    # @ToDo: This should use date/end_date not just date
+            #    date_filter = S3DateFilter("date",
+            #                               #formstyle = filter_formstyle_summary,
+            #                               label = "",
+            #                               #hide_time = True,
+            #                               )
+            #    date_filter.input_labels = {"ge": "Start Time/Date", "le": "End Time/Date"}
 
-                filter_widgets = [S3TextFilter(["name",
-                                                "comments",
-                                                ],
-                                               formstyle = text_filter_formstyle,
-                                               label = T("Search"),
-                                               _placeholder = T("Enter search term…"),
-                                               ),
-                                  S3OptionsFilter("organisation_id",
-                                                  label = "",
-                                                  noneSelectedText = "Lead Organization",
-                                                  widget = "multiselect",
-                                                  ),
-                                  S3OptionsFilter("closed",
-                                                  formstyle = filter_formstyle_summary,
-                                                  options = {"*": T("All"),
-                                                             False: T("Open"),
-                                                             True: T("Closed"),
-                                                             },
-                                                  cols = 1,
-                                                  multiple = False,
-                                                  ),
-                                  S3OptionsFilter("incident_type_id",
-                                                  formstyle = filter_formstyle_summary,
-                                                  label = T("Incident Type"),
-                                                  noneSelectedText = "All",
-                                                  widget = "multiselect",
-                                                  ),
-                                  date_filter,
-                                  ]
+            #    filter_widgets = [S3TextFilter(["name",
+            #                                    "comments",
+            #                                    ],
+            #                                   formstyle = text_filter_formstyle,
+            #                                   label = T("Search"),
+            #                                   _placeholder = T("Enter search term…"),
+            #                                   ),
+            #                      S3OptionsFilter("organisation_id",
+            #                                      label = "",
+            #                                      noneSelectedText = "Lead Organization",
+            #                                      widget = "multiselect",
+            #                                      ),
+            #                      S3OptionsFilter("closed",
+            #                                      formstyle = filter_formstyle_summary,
+            #                                      options = {"*": T("All"),
+            #                                                 False: T("Open"),
+            #                                                 True: T("Closed"),
+            #                                                 },
+            #                                      cols = 1,
+            #                                      multiple = False,
+            #                                      ),
+            #                      S3OptionsFilter("incident_type_id",
+            #                                      formstyle = filter_formstyle_summary,
+            #                                      label = T("Incident Type"),
+            #                                      noneSelectedText = "All",
+            #                                      widget = "multiselect",
+            #                                      ),
+            #                      date_filter,
+            #                      ]
 
-                list_fields = ["closed",
-                               "name",
-                               (T("Type"), "incident_type_id"),
-                               "location_id",
-                               (T("Start"), "date"),
-                               (T("End"), "end_date"),
-                               "event_id",
-                               ]
+            #    list_fields = ["closed",
+            #                   "name",
+            #                   (T("Type"), "incident_type_id"),
+            #                   "location_id",
+            #                   (T("Start"), "date"),
+            #                   (T("End"), "end_date"),
+            #                   "event_id",
+            #                   ]
 
-                s3db.configure("event_incident",
-                               filter_widgets = filter_widgets,
-                               list_fields = list_fields,
-                               )
+            #    s3db.configure("event_incident",
+            #                   filter_widgets = filter_widgets,
+            #                   list_fields = list_fields,
+            #                   )
 
                 # @ToDo: Configure Timeline
                 # Last 5 days (@ToDo: Configurable Start/End & deduce appropriate unit)
                 # Qty of Newly-opened Incidents per Unit
-                pass
 
-            elif r.method == "assign":
+            if r.method == "assign":
                 current.menu.main = ""
+
+            elif r.component_name == "task":
+                from s3 import S3SQLCustomForm
+                crud_form = S3SQLCustomForm("name",
+                                            "description",
+                                            "source",
+                                            "priority",
+                                            "pe_id",
+                                            "date_due",
+                                            "status",
+                                            "comments",
+                                            )
+                r.component.configure(crud_form = crud_form,
+                                      )
 
             elif r.representation == "popup":
                 if not r.component:
-                    # Popup just used to link to Event
+                    if r.get_vars.get("set_event"):
+                        # Popup just used to link to Event
+                        #s3.crud_strings["event_incident"].title_update =  T("Add to Event")
+                        from s3 import S3SQLCustomForm
+                        crud_form = S3SQLCustomForm("event_id",
+                                                    )
+                        s3db.configure("event_incident",
+                                       crud_form = crud_form,
+                                       )
+                #elif r.component_name == "post":
+                #    from s3 import S3SQLCustomForm
 
-                    #s3.crud_strings["event_incident"].title_update =  T("Add to Event")
+                #    crud_form = S3SQLCustomForm("body",
+                #                                )
 
-                    from s3 import S3SQLCustomForm
-
-                    crud_form = S3SQLCustomForm("event_id",
-                                                )
-
-                    s3db.configure("event_incident",
-                                   crud_form = crud_form,
-                                   )
-                elif r.component_name == "post":
-                    from s3 import S3SQLCustomForm
-
-                    crud_form = S3SQLCustomForm("body",
-                                                )
-
-                    s3db.configure("cms_post",
-                                   crud_form = crud_form,
-                                   )
+                #    s3db.configure("cms_post",
+                #                   crud_form = crud_form,
+                #                   )
 
             return True
         s3.prep = custom_prep
@@ -489,26 +644,30 @@ def config(settings):
                                                  "modules", "templates",
                                                  "WACOP", "views",
                                                  "assign.html")
-                else:
-                    # Summary or Profile pages
-                    # Additional styles
-                    s3.external_stylesheets += ["https://cdn.knightlab.com/libs/timeline3/latest/css/timeline.css",
-                                                "https://fonts.googleapis.com/css?family=Merriweather:400,700|Source+Sans+Pro:400,700",
-                                                ]
+                #elif r.component_name == "post":
+                #    # Add Tags - no, do client-side
+                #    output["form"].append()
 
-                    if r.method == "summary":
-                        # Open the Custom profile page instead of the normal one
-                        from gluon import URL
-                        from s3 import S3CRUD
-                        custom_url = URL(args = ["[id]", "custom"])
-                        S3CRUD.action_buttons(r,
-                                              read_url=custom_url,
-                                              update_url=custom_url)
+                #else:
+                #    # Summary or Profile pages
+                #    # Additional styles
+                #    s3.external_stylesheets += ["https://cdn.knightlab.com/libs/timeline3/latest/css/timeline.css",
+                #                                "https://fonts.googleapis.com/css?family=Merriweather:400,700|Source+Sans+Pro:400,700",
+                #                                ]
 
-                    # System-wide Alert
-                    from templates.WACOP.controllers import custom_WACOP
-                    custom = custom_WACOP()
-                    output["system_wide"] = custom._system_wide_html()
+                    #if r.method == "summary":
+                    #    # Open the Custom profile page instead of the normal one
+                    #    from gluon import URL
+                    #    from s3 import S3CRUD
+                    #    custom_url = URL(args = ["[id]", "custom"])
+                    #    S3CRUD.action_buttons(r,
+                    #                          read_url=custom_url,
+                    #                          update_url=custom_url)
+
+               #     # System-wide Alert
+               #     from templates.WACOP.controllers import custom_WACOP
+               #     custom = custom_WACOP()
+               #     output["system_wide"] = custom._system_wide_html()
 
             return output
         s3.postp = custom_postp
