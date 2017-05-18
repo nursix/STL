@@ -616,6 +616,23 @@ def response_type():
 def termination_type():
     """ Termination Types: RESTful CRUD Controller """
 
+    def prep(r):
+
+        if settings.get_dvr_activity_use_service_type() and \
+           settings.get_org_services_hierarchical():
+
+            # Limit the selection to root services (case activity
+            # threads are usually per root service type, and all
+            # sub-categories should use a common exit type taxonomy)
+            field = r.table.service_id
+            query = (db.org_service.parent == None)
+            field.requires = IS_EMPTY_OR(IS_ONE_OF(db(query),
+                                                   "org_service.id",
+                                                   field.represent,
+                                                   ))
+        return True
+    s3.prep = prep
+
     return s3_rest_controller()
 
 # -----------------------------------------------------------------------------
@@ -816,6 +833,11 @@ def note():
         field = s3db.dvr_note.person_id
         field.default = person_id
         field.readable = field.writable = False
+
+    return s3_rest_controller()
+
+def note_type():
+    """ Note Types: RESTful CRUD Controller """
 
     return s3_rest_controller()
 

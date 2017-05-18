@@ -149,8 +149,12 @@ class S3OptionsMenu(default.S3OptionsMenu):
                         M("Create", m="create"),
                         M("All Beneficiaries", vars = {}),
                         M("Beneficiary Report", m="report"),
-                        M(follow_up_label, f="due_followups"),
                         ),
+                    M("Protection Response",
+                      c="dvr", f="case_activity", link=False)(
+                          M("Overview", m="summary", p="read"),
+                          M(follow_up_label, f="due_followups"),
+                      ),
                     M("Activities", link=False,
                       restrict = ("ORG_ADMIN", "GROUP_ACTIVITIES", "MENTAL_HEALTH"))(
                         M("Group Activities", f="activity",
@@ -222,7 +226,7 @@ class S3OptionsMenu(default.S3OptionsMenu):
                     M("Administration", c=("org", "project"), link=False,
                       restrict = (ADMIN, "ORG_ADMIN"))(
                         M("Organization Types", f="organisation_type"),
-                        M("Service Types", f="service"),
+                        M("Service Types", f="service", m="hierarchy"),
                         M("Facility Types", f="facility_type"),
                         M("Projects", c="project", f="project"),
                     ),

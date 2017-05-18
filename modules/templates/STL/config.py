@@ -181,6 +181,8 @@ def config(settings):
                                 args = ["STL", "img", "stl_menu_logo.png"],
                                 )
 
+    settings.ui.hierarchy_cascade_option_in_tree = False
+
     # =========================================================================
     # DVR Case Management
     #
@@ -218,6 +220,49 @@ def config(settings):
     settings.customise_dvr_home = customise_dvr_home
 
     # -------------------------------------------------------------------------
+    def dvr_activity_update_onaccept(form):
+        """
+            Onaccept of group activity:
+                - propagate the service_id to all case activities
+                  linked to it
+        """
+
+        db = current.db
+        s3db = current.s3db
+
+        # Read form data
+        form_vars = form.vars
+        if "id" in form_vars:
+            record_id = form_vars.id
+        elif hasattr(form, "record_id"):
+            record_id = form.record_id
+        else:
+            record_id = None
+
+        if record_id:
+
+            # Get the service ID
+            atable = s3db.dvr_activity
+            row = db(atable.id == record_id).select(atable.service_id,
+                                                    limitby = (0, 1),
+                                                    ).first()
+            if row:
+                service_id = row.service_id
+                if service_id:
+                    # Update the service_id of all case activities
+                    # linked to this group activity
+                    catable = s3db.dvr_case_activity
+                    query = (catable.activity_id == record_id) & \
+                            (catable.service_id != service_id)
+                    db(query).update(service_id = service_id)
+
+        # Also execute standard onaccept, if any
+        onaccept = s3db.get_config("dvr_activity", "onaccept")
+        if onaccept:
+            from gluon.tools import callback
+            callback(onaccept, form, tablename="dvr_activity")
+
+    # -------------------------------------------------------------------------
     def customise_dvr_activity_controller(**attr):
 
         db = current.db
@@ -248,6 +293,7 @@ def config(settings):
                            S3Represent, \
                            S3SQLCustomForm, \
                            S3SQLInlineComponent, \
+                           S3TextFilter, \
                            s3_get_filter_opts
 
             # Expose organisation_id
@@ -530,6 +576,11 @@ def config(settings):
 
                 # Custom filter widgets
                 filter_widgets = [
+                    S3TextFilter(["facilitator",
+                                  "comments",
+                                  ],
+                                 label = T("Search"),
+                                 ),
                     S3HierarchyFilter("service_id",
                                       lookup = "org_service",
                                       filter = (FS("root_service").belongs(root_service_ids)),
@@ -561,6 +612,12 @@ def config(settings):
                 script = "/%s/static/themes/STL/js/activity.js" % r.application
                 if script not in scripts:
                     scripts.append(script)
+
+            s3db.configure("dvr_activity",
+                           # Custom update-onaccept to propagate
+                           # service_id changes to case activities:
+                           update_onaccept = dvr_activity_update_onaccept,
+                           )
 
             return result
         s3.prep = custom_prep
@@ -661,7 +718,8 @@ def config(settings):
     def vulnerability_type_validation(form):
         """
             Validate "Protection Assessment" (dvr_vulnerability_type link)
-            in case activities: at least one THREAT must be selected
+            in case activities: for any required root category, at least one
+            child category must be selected
         """
 
         key = "link_defaultvulnerability_type"
@@ -673,31 +731,102 @@ def config(settings):
             # No inline link we can validate
             return
 
-        # Get the "THREAT" root node
+        # Single value? => convert to list
+        if vulnerability_types and \
+           type(vulnerability_types) is not list:
+            vulnerability_types = [vulnerability_types]
+
+        # Get all required root categories
         ttable = current.s3db.dvr_vulnerability_type
-        query = (ttable.name == "THREAT") & \
+        query = (ttable.required == True) & \
                 (ttable.deleted == False)
-        row = current.db(query).select(ttable.id, limitby=(0, 1)).first()
-        if not row:
+        rows = current.db(query).select(ttable.id,
+                                        ttable.name,
+                                        )
+        if not rows:
             return
 
-        # Get all descendants of the THREAT node
+        # Get the hierarchy
         from s3 import S3Hierarchy
         h = S3Hierarchy("dvr_vulnerability_type")
-        threats = h.findall(row.id)
-        if not threats:
-            return
 
-        message = T("At least one THREAT must be selected")
-        if vulnerability_types:
-            # Single value?
-            if type(vulnerability_types) is not list:
-                vulnerability_types = [vulnerability_types]
-            # Any THREAT selected?
-            if not any(t in threats for t in vulnerability_types):
+        for row in rows:
+
+            # Find all child categories
+            children = h.findall(row.id)
+            if not children:
+                continue
+
+            message = T("At least one %(category)s must be selected") % \
+                      {"category": row.name}
+
+            # Check that at least one child is selected
+            if vulnerability_types:
+                if not any(c in children for c in vulnerability_types):
+                    form.errors[key] = message
+                    break
+            else:
+                # Nothing selected at all
                 form.errors[key] = message
+                break
+
+    # -------------------------------------------------------------------------
+    def case_activity_validation(form):
+        """
+            Custom validation for case activities:
+                - prevent linking the same beneficiary twice to the
+                  same group activity
+        """
+
+        db = current.db
+        s3db = current.s3db
+
+        form_vars = form.vars
+        if "id" in form_vars:
+            record_id = form_vars.id
+        elif hasattr(form, "record_id"):
+            record_id = form.record_id
         else:
-            form.errors[key] = message
+            record_id = None
+
+        # Get the person_id and the activity_id
+        table = s3db.dvr_case_activity
+        load = []
+        values = {}
+        for fieldname in ("person_id", "activity_id"):
+            if fieldname in form_vars:
+                value = form_vars[fieldname]
+            elif record_id:
+                load.append(fieldname)
+                continue
+            else:
+                value = table[fieldname].default
+            values[fieldname] = value
+
+        # Load missing values from existing record
+        if record_id and load:
+            fields = [table[fieldname] for fieldname in load]
+            query = (table.id == record_id)
+            row = db(query).select(limitby = (0, 1), *fields).first()
+            for fieldname in load:
+                values[fieldname] = row[fieldname]
+
+        person_id = values.get("person_id")
+        activity_id = values.get("activity_id")
+
+        # Check whether another link already exists
+        if person_id and activity_id:
+            query = (table.person_id == person_id) & \
+                    (table.activity_id == activity_id) & \
+                    (table.deleted == False)
+            if record_id:
+                query &= (table.id != record_id)
+            row = db(query).select(table.id, limitby=(0, 1)).first()
+            if row:
+                error = T("Beneficiary is already registered for this activity")
+                for fieldname in ("person_id", "activity_id"):
+                    if fieldname in form_vars:
+                        form.errors[fieldname] = error
 
     # -------------------------------------------------------------------------
     def pss_case_activity_onaccept(form):
@@ -732,6 +861,50 @@ def config(settings):
         db(query).update(project_id = row.project_id)
 
     # -------------------------------------------------------------------------
+    def expose_project_id(table, mandatory=False):
+        """
+            Helper function to expose "Project Code"
+        """
+
+        from s3 import IS_ONE_OF
+
+        field = table.project_id
+        field.label = current.T("Project Code")
+        field.comment = None
+        field.readable = field.writable = True
+
+        # Represent as code
+        field.represent = stl_project_id_represent
+        requires = IS_ONE_OF(current.db, "project_project.id",
+                             stl_project_id_represent,
+                             )
+
+        # Mandatory or not?
+        if mandatory:
+            field.requires = requires
+        else:
+            field.requires = IS_EMPTY_OR(requires)
+
+    def expose_human_resource_id(table, mandatory=False):
+        """
+            Helper function to expose "Person Responsible"
+        """
+
+        field = table.human_resource_id
+        field.label = current.T("Person Responsible")
+        field.widget = None
+        field.comment = None
+        field.readable = field.writable = True
+
+        # Mandatory or not?
+        requires = field.requires
+        if isinstance(requires, IS_EMPTY_OR):
+            if mandatory:
+                field.requires = requires.other
+        elif not mandatory:
+            field.requires = IS_EMPTY_OR(requires)
+
+    # -------------------------------------------------------------------------
     def customise_dvr_case_activity_resource(r, tablename):
 
         from s3 import FS, \
@@ -742,59 +915,35 @@ def config(settings):
                        S3SQLInlineLink, \
                        s3_comments_widget
 
+        T = current.T
         db = current.db
         s3db = current.s3db
 
         s3 = current.response.s3
 
-        T = current.T
+        args = r.args
+        if r.tablename == "dvr_case_activity" and \
+           args and args[0] == "count_due_followups":
 
-        component_name = r.component_name
+            # Just counting due follow-ups
 
-        def expose_project_id(table, mandatory=False):
-            """
-                Helper function to expose "Project Code"
-            """
+            # Get service root type
+            stable = s3db.org_service
+            query = (stable.parent == None) & \
+                    (stable.name == INDIVIDUAL_SUPPORT) & \
+                    (stable.deleted != True)
+            service = db(query).select(stable.id, limitby=(0, 1)).first()
+            root_service_id = service.id if service else None
 
-            field = table.project_id
-            field.label = T("Project Code")
-            field.comment = None
-            field.readable = field.writable = True
+            # Filter activities by root service
+            query = (FS("service_id$root_service") == root_service_id)
+            r.resource.add_filter(query)
 
-            # Represent as code
-            field.represent = stl_project_id_represent
-            requires = IS_ONE_OF(db, "project_project.id",
-                                 stl_project_id_represent,
-                                 )
-
-            # Mandatory or not?
-            if mandatory:
-                field.requires = requires
-            else:
-                field.requires = IS_EMPTY_OR(requires)
-
-        def expose_human_resource_id(table, mandatory=False):
-            """
-                Helper function to expose "Person Responsible"
-            """
-
-            field = table.human_resource_id
-            field.label = T("Person Responsible")
-            field.widget = None
-            field.comment = None
-            field.readable = field.writable = True
-
-            # Mandatory or not?
-            requires = field.requires
-            if isinstance(requires, IS_EMPTY_OR):
-                if mandatory:
-                    field.requires = requires.other
-            elif not mandatory:
-                field.requires = IS_EMPTY_OR(requires)
+            return
 
         # Different representations of service_id:
-        # - lists use hierarchical
-        # - hierarchy-widgets use non-hierarchical
+        #   - lists use hierarchical
+        #   - hierarchy-widgets use non-hierarchical
         service_represent = S3Represent(lookup = "org_service",
                                         hierarchy = False,
                                         translate = True,
@@ -807,10 +956,10 @@ def config(settings):
         # Custom labels
         COMPLAINT_TYPE = T("MH Complaint Type")
 
+        component_name = r.component_name
         if r.tablename == "dvr_activity":
-            # "Beneficiaries" tab of group activities
 
-            from s3 import S3PersonAutocompleteWidget
+            # "Beneficiaries" tab of PSS or MH group activities
 
             catable = s3db.dvr_case_activity
 
@@ -818,13 +967,28 @@ def config(settings):
             field = catable.person_id
             field.readable = field.writable = True
             field.represent = s3db.pr_PersonRepresent(show_link=True)
+            from s3 import S3PersonAutocompleteWidget
             field.widget = S3PersonAutocompleteWidget(
                                controller = "dvr",
                                function = "person_search",
                                )
             field.comment = T("Enter some characters of the ID or name to start the search, then select from the drop-down")
 
-            # Determine root service type of maste record
+            # Adapt CRUD strings to perspective
+            s3.crud_strings["dvr_case_activity"] = Storage(
+                label_create = T("Add Beneficiary"),
+                title_display = T("Beneficiary Details"),
+                title_list = T("Beneficiaries"),
+                title_update = T("Edit Beneficiary"),
+                label_list_button = T("List Beneficiaries"),
+                label_delete_button = T("Remove Beneficiary"),
+                msg_record_created = T("Beneficiary added"),
+                msg_record_modified = T("Beneficiary updated"),
+                msg_record_deleted = T("Beneficiary removed"),
+                msg_list_empty = T("No Beneficiaries currently registered"),
+                )
+
+            # Determine root service type of master record
             root_service_id = root_service_name = None
             stable = s3db.org_service
 
@@ -889,6 +1053,14 @@ def config(settings):
                 field = catable.termination_type_id
                 field.label = T("Type of Exit")
                 field.readable = field.writable = True
+
+                # Filter termination types
+                tttable = s3db.dvr_termination_type
+                query = (tttable.service_id == root_service_id)
+                field.requires = IS_EMPTY_OR(IS_ONE_OF(db(query),
+                                                       "dvr_termination_type.id",
+                                                       field.represent,
+                                                       ))
 
                 crud_form = S3SQLCustomForm("person_id",
                                             S3SQLInlineLink("need",
@@ -977,9 +1149,19 @@ def config(settings):
                            extra_fields = "person_id$date_of_birth",
                            )
 
-        elif r.component_name == "case_activity" or r.function == "due_followups":
+        elif r.tablename == "dvr_case_activity" or \
+             r.component_name == "case_activity" or \
+             r.function == "due_followups":
 
-            # "Individual Support" tab of Beneficiary, or "Due Follow-ups"
+            # "Individual Support" perspectives, incl. due follow-ups
+
+            # Get service root type
+            stable = s3db.org_service
+            query = (stable.parent == None) & \
+                    (stable.name == INDIVIDUAL_SUPPORT) & \
+                    (stable.deleted != True)
+            service = db(query).select(stable.id, limitby=(0, 1)).first()
+            root_service_id = service.id if service else None
 
             # CRUD Strings use "Protection Response"
             s3.crud_strings["dvr_case_activity"] = Storage(
@@ -995,26 +1177,71 @@ def config(settings):
                 msg_list_empty = T("No Protection Responses currently registered"),
                 )
 
-            # Get service root type
-            stable = s3db.org_service
-            query = (stable.parent == None) & \
-                    (stable.name == INDIVIDUAL_SUPPORT) & \
-                    (stable.deleted != True)
-            service = db(query).select(stable.id, limitby=(0, 1)).first()
-            root_service_id = service.id if service else None
+            if r.tablename == "dvr_case_activity" or \
+               r.function == "due_followups":
 
-            if r.function == "due_followups":
+                # Master perspective
                 table = r.table
                 component = r.resource
+
                 # Filter activities by root service
                 query = (FS("service_id$root_service") == root_service_id)
                 component.add_filter(query)
+
+                # Configure summary
+                summary = ({"name": "table",
+                            "label": "Table",
+                            "widgets": [{"method": "datatable"}]
+                            },
+                           {"name": "charts",
+                            "label": "Report",
+                            "widgets": [{"method": "report",
+                                         "ajax_init": True}]
+                            },
+                           )
+
+                # Configure report options
+                report_axes = ["person_id$gender",
+                               "person_id$person_details.nationality",
+                               "project_id",
+                               "organisation_id",
+                               "service_id",
+                               (T("Interventions Required"),
+                                   "response_type__link.response_type_id",
+                                   ),
+                               "need__link.need_id",
+                               ]
+
+                report_options = {
+                    "rows": report_axes,
+                    "cols": report_axes,
+                    "fact": [(T("Number of Beneficiaries"), "count(person_id)"),
+                             (T("Number of Activities"), "count(id)"),
+                             ],
+                    "defaults": {"rows": "service_id",
+                                 "cols": "project_id",
+                                 "fact": "count(person_id)",
+                                 "totals": True,
+                                 },
+                    }
+
+                component.configure(report_options = report_options,
+                                    summary = summary,
+                                    )
+
             else:
+                # Component tab
                 table = r.component.table
                 component = r.component
 
+            # Extend onvalidation with custom validation for
+            # mandatory vulnerability type categories
+            s3db.add_custom_callback("dvr_case_activity",
+                                     "onvalidation",
+                                     vulnerability_type_validation,
+                                     )
+
             component.configure(orderby = ~table.start_date,
-                                onvalidation = vulnerability_type_validation,
                                 )
 
             # Expose "Project Code" and "Person responsible" (both mandatory)
@@ -1088,6 +1315,9 @@ def config(settings):
             field = table.end_date
             field.label = T("Closed on")
             field.readable = True
+            # Allow to manually set closed_on (for historic records, only create)
+            if not r.component_id:
+                field.writable = True
 
             # Customise "completed" flag
             # => label as "Status" and use drop-down for open/closed
@@ -1114,6 +1344,19 @@ def config(settings):
             field.widget = s3_comments_widget
             field = ftable.approved
             field.label = T("SNF Assistance Approved by Committee")
+
+            # Expose termination type field
+            field = table.termination_type_id
+            field.label = T("Closure Reason")
+            field.readable = field.writable = True
+
+            # Filter termination types
+            tttable = s3db.dvr_termination_type
+            query = (tttable.service_id == root_service_id)
+            field.requires = IS_EMPTY_OR(IS_ONE_OF(db(query),
+                                                   "dvr_termination_type.id",
+                                                   field.represent,
+                                                   ))
 
             # Custom CRUD form
             crud_form = S3SQLCustomForm("person_id",
@@ -1156,6 +1399,7 @@ def config(settings):
                                         "completed",
                                         "end_date",
                                         (T("Result of Protection Response"), "outcome"),
+                                        "termination_type_id",
                                         S3SQLInlineComponent(
                                             "document",
                                             name = "file",
@@ -1168,6 +1412,12 @@ def config(settings):
                                             ),
                                         "comments",
                                         )
+
+            scripts = s3.scripts
+            script = "/%s/static/themes/STL/js/case_activity.js" % r.application
+            if script not in scripts:
+                scripts.append(script)
+
             list_fields = ["person_id",
                            "service_id",
                            "human_resource_id",
@@ -1195,17 +1445,10 @@ def config(settings):
 
             # Configure custom onaccept to inherit
             # project ID from group activity
-            component = r.component
-            onaccept = component.get_config("onaccept")
-            if onaccept:
-                if isinstance(onaccept, (tuple, list)):
-                    if pss_case_activity_onaccept not in onaccept:
-                        onaccept = tuple(onaccept) + (pss_case_activity_onaccept,)
-                elif onaccept and onaccept != pss_case_activity_onaccept:
-                    onaccept = (onaccept, pss_case_activity_onaccept)
-                elif not onaccept:
-                    onaccept = pss_case_activity_onaccept
-            component.configure(onaccept=onaccept)
+            s3db.add_custom_callback("dvr_case_activity",
+                                     "onaccept",
+                                     pss_case_activity_onaccept,
+                                     )
 
             # Get service root types
             stable = s3db.org_service
@@ -1399,6 +1642,14 @@ def config(settings):
             field.label = T("Type of Exit")
             field.readable = field.writable = True
 
+            # Filter termination types
+            tttable = s3db.dvr_termination_type
+            query = (tttable.service_id == root_service_id)
+            field.requires = IS_EMPTY_OR(IS_ONE_OF(db(query),
+                                                   "dvr_termination_type.id",
+                                                   field.represent,
+                                                   ))
+
             # Custom CRUD form
             crud_form = S3SQLCustomForm("person_id",
                                         S3SQLInlineLink("need",
@@ -1439,11 +1690,8 @@ def config(settings):
                            ]
 
         else:
-
-            # Case activity list (or counting due follow-ups)
-
+            # Other perspective (currently unused)
             expose_project_id(s3db.dvr_case_activity)
-
             crud_form = S3SQLCustomForm("person_id",
                                         "project_id",
                                         "service_id",
@@ -1467,6 +1715,10 @@ def config(settings):
                        list_fields = list_fields,
                        owner_group = stl_case_activity_owner_group,
                        )
+        s3db.add_custom_callback("dvr_case_activity",
+                                 "onvalidation",
+                                 case_activity_validation,
+                                 )
 
     settings.customise_dvr_case_activity_resource = customise_dvr_case_activity_resource
 
@@ -1486,14 +1738,14 @@ def config(settings):
             else:
                 result = True
 
+            # Show person_id as link to case
+            table = r.resource.table
+            table.person_id.represent = s3db.pr_PersonRepresent(show_link=True)
+
             if r.function == "due_followups":
 
                 crud_strings = s3.crud_strings["dvr_case_activity"]
                 crud_strings["title_list"] = T("Interventions to follow-up")
-
-                # Show person_id as link to case
-                table = r.resource.table
-                table.person_id.represent = s3db.pr_PersonRepresent(show_link=True)
 
                 # Custom list fields
                 list_fields = [(T("Ref.No."), "person_id$pe_label"),
@@ -1518,11 +1770,69 @@ def config(settings):
                                                hidden = True,
                                                ),
                                   ]
+            else:
+                # Custom list fields
+                list_fields = ["person_id",
+                               "service_id",
+                               "human_resource_id",
+                               "project_id",
+                               "need__link.need_id",
+                               "start_date",
+                               (T("Interventions Required"),
+                                    "response_type__link.response_type_id"),
+                               "priority",
+                               "followup",
+                               "followup_date",
+                               "completed",
+                               "end_date",
+                               ]
 
-                r.resource.configure(filter_widgets = filter_widgets,
-                                     list_fields = list_fields,
-                                     )
+                # Custom filter widgets
+                #Project Code,
+                #Person Responsible,
+                #Protection Assesment,
+                #Service Type,
+                #Protection Response Sector,
+                #Interventions required
 
+                from s3 import S3HierarchyFilter, \
+                               S3OptionsFilter, \
+                               S3TextFilter, \
+                               s3_get_filter_opts
+
+                filter_widgets = [S3TextFilter(["person_id$pe_label",
+                                                "person_id$first_name",
+                                                "person_id$last_name",
+                                                ],
+                                                label = T("Search"),
+                                                ),
+                                  S3HierarchyFilter("person_id$dvr_case.organisation_id",
+                                                    leafonly = False,
+                                                    cascade_select = True,
+                                                    ),
+                                  S3OptionsFilter("human_resource_id",
+                                                  ),
+                                  S3OptionsFilter("project_id",
+                                                  options = s3_get_filter_opts("project_project"),
+                                                  ),
+                                  S3HierarchyFilter("service_id",
+                                                    hidden = True,
+                                                    ),
+                                  S3HierarchyFilter("vulnerability_type_case_activity.vulnerability_type_id",
+                                                    label = T("Protection Assessment"),
+                                                    hidden = True,
+                                                    ),
+                                  S3HierarchyFilter("case_activity_need.need_id",
+                                                    hidden = True,
+                                                    ),
+                                  S3HierarchyFilter("response_type_case_activity.response_type_id",
+                                                    hidden = True,
+                                                    ),
+                                  ]
+
+            r.resource.configure(filter_widgets = filter_widgets,
+                                 list_fields = list_fields,
+                                 )
 
             return result
         s3.prep = custom_prep
@@ -1601,6 +1911,16 @@ def config(settings):
 
     settings.customise_dvr_response_type_resource = customise_dvr_response_type_resource
 
+    # -------------------------------------------------------------------------
+    def customise_dvr_vulnerability_type_resource(r, tablename):
+
+        # Expose required-flag
+        table = current.s3db.dvr_vulnerability_type
+        field = table.required
+        field.readable = field.writable = True
+
+    settings.customise_dvr_vulnerability_type_resource = customise_dvr_vulnerability_type_resource
+
     # =========================================================================
     # Person Registry
     #
@@ -1664,6 +1984,7 @@ def config(settings):
                                            "contact_emergency",
                                            "presence",
                                            ),
+                       update_realm = True,
                        )
 
         # Custom components
@@ -1965,6 +2286,13 @@ def config(settings):
                                                           ),
                                         )
 
+                    # Custom labels for referral types
+                    field = dtable.referral_type_id
+                    field.label = T("Referred to Case Management by")
+
+                    field = dtable.activity_referral_type_id
+                    field.label = T("Referred to Group Activities by")
+
                     # Subset of languages for the case-language component
                     ltable = s3db.dvr_case_language
                     field = ltable.language
@@ -2005,6 +2333,7 @@ def config(settings):
                                         "dvr_case.status_id",
                                         "dvr_case.date",
                                         "case_details.referral_type_id",
+                                        "case_details.activity_referral_type_id",
                                         "dvr_case.organisation_id",
                                         "dvr_case.human_resource_id",
                                         "first_name",
@@ -2382,6 +2711,45 @@ def config(settings):
         return attr
 
     settings.customise_org_facility_controller = customise_org_facility_controller
+
+    # -------------------------------------------------------------------------
+    def customise_org_service_controller(**attr):
+
+        s3db = current.s3db
+        s3 = current.response.s3
+
+        # Custom prep
+        standard_prep = s3.prep
+        def custom_prep(r):
+
+            # Call standard prep
+            if callable(standard_prep):
+                result = standard_prep(r)
+            else:
+                result = True
+
+            # Prevent name/parent change for service categories
+            # with dependent functionality:
+            record = r.record
+            if record and \
+               record.name in (INDIVIDUAL_SUPPORT, MENTAL_HEALTH) and \
+               not record.parent:
+
+                field = r.table.name
+                field.writable = False
+
+                field = r.table.parent
+                field.readable = field.writable = False
+
+                # @todo: delete should be prevented too?
+                #r.resource.configure(deletable = False)
+
+            return result
+        s3.prep = custom_prep
+
+        return attr
+
+    settings.customise_org_service_controller = customise_org_service_controller
 
     # =========================================================================
     # Project Module
