@@ -4,7 +4,7 @@
 
     @requires: U{B{I{gluon}} <http://web2py.com>}
 
-    @copyright: 2009-2016 (c) Sahana Software Foundation
+    @copyright: 2009-2017 (c) Sahana Software Foundation
     @license: MIT
 
     Permission is hereby granted, free of charge, to any person
@@ -5488,7 +5488,8 @@ class S3LocationSelector(S3Selector):
 
         db = current.db
         if query is not None:
-            query &= (gtable.deleted == False)
+            query &= (gtable.deleted == False) & \
+                     (gtable.end_date == None)
             fields = [gtable.id,
                       gtable.name,
                       gtable.level,
