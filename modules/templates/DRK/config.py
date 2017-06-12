@@ -4,7 +4,7 @@ import datetime
 
 from collections import OrderedDict
 
-from gluon import current, SPAN
+from gluon import current, SPAN, URL
 from gluon.storage import Storage
 
 from s3 import FS, IS_ONE_OF, S3DateTime, S3Method, s3_str, s3_unicode
@@ -862,6 +862,8 @@ def config(settings):
     settings.dvr.id_code_pattern = "(?P<label>[^,]*),(?P<family>[^,]*),(?P<last_name>[^,]*),(?P<first_name>[^,]*),(?P<date_of_birth>[^,]*),.*"
     # Issue a "not checked-in" warning in case event registration
     settings.dvr.event_registration_checkin_warning = True
+    # Exclude FOOD and SURPLUS-MEALS events from event registration
+    settings.dvr.event_registration_exclude_codes = ("FOOD*", "SURPLUS-MEALS")
 
     # -------------------------------------------------------------------------
     def customise_dvr_home():
@@ -892,14 +894,23 @@ def config(settings):
         etable = s3db.dvr_case_event
 
         # Get event type ID
-        query = (ttable.code == code) & \
-                (ttable.deleted != True)
-        row = db(query).select(ttable.id, limitby=(0, 1)).first()
-        if row:
-            type_id = row.id
+        if code[-1] == "*":
+            # Prefix
+            query = (ttable.code.like("%s%%" % code[:-1]))
+            limitby = None
         else:
-            # No such event
+            query = (ttable.code == code)
+            limitby = (0, 1)
+        query &= (ttable.deleted == False)
+
+        rows = db(query).select(ttable.id, limitby=limitby)
+        if not rows:
+            # No such event type
             return set()
+        elif limitby:
+            type_query = (etable.type_id == rows.first().id)
+        else:
+            type_query = (etable.type_id.belongs(set(row.id for row in rows)))
 
         # Determine deadline
         now = current.request.utcnow
@@ -911,10 +922,10 @@ def config(settings):
 
         # Join only events after the deadline
         left = etable.on((etable.person_id == ctable.person_id) & \
-                         (etable.type_id == type_id) & \
+                         type_query & \
                          (etable.date != None) & \
                          (etable.date >= then) & \
-                         (etable.deleted != True))
+                         (etable.deleted == False))
 
         # ...and then select the rows which don't have any
         query = (ctable.archived == False) & \
@@ -2364,6 +2375,8 @@ def config(settings):
             Custom onaccept-method for case events
                 - cascade FOOD events to other members of the same case group
 
+            @todo: currently unused => remove?
+
             @param form: the Form
         """
 
@@ -2492,28 +2505,19 @@ def config(settings):
     # -------------------------------------------------------------------------
     def customise_dvr_case_event_resource(r, tablename):
 
-        resource = current.s3db.resource("dvr_case_event")
+        s3db = current.s3db
 
-        # Get the current create_onaccept setting
-        hook = "create_onaccept"
-        callback = resource.get_config(hook)
+        from food import DRKRegisterFoodEvent
+        s3db.set_method("dvr", "case_event",
+                        method = "register_food",
+                        action = DRKRegisterFoodEvent,
+                        )
 
-        # Fall back to generic onaccept
-        if not callback:
-            hook = "onaccept"
-            callback = resource.get_config(hook)
-
-        # Extend with custom onaccept
-        custom_onaccept = case_event_create_onaccept
-        if callback:
-            if isinstance(callback, (tuple, list)):
-                if custom_onaccept not in callback:
-                    callback = list(callback) + [custom_onaccept]
-            else:
-                callback = [callback, custom_onaccept]
-        else:
-            callback = custom_onaccept
-        resource.configure(**{hook: callback})
+        #s3db.add_custom_callback("dvr_case_event",
+        #                         "onaccept",
+        #                         case_event_create_onaccept,
+        #                         method = "create",
+        #                         )
 
     settings.customise_dvr_case_event_resource = customise_dvr_case_event_resource
     # -------------------------------------------------------------------------
@@ -2528,14 +2532,22 @@ def config(settings):
 
         if event_code:
             ttable = current.s3db.dvr_case_event_type
-            query = (ttable.code == event_code) & \
-                    (ttable.deleted != True)
-            row = current.db(query).select(ttable.id,
-                                           limitby = (0, 1),
-                                           ).first()
-            if row:
+
+            if event_code[-1] == "*":
+                query = (ttable.code.like("%s%%" % event_code[:-1])) & \
+                        (ttable.is_inactive == False)
+                if event_code[:-1] == "FOOD":
+                    # Include SURPLUS-MEALS events
+                    query |= (ttable.code == "SURPLUS-MEALS")
+            else:
+                query = (ttable.code == event_code)
+            query &= (ttable.deleted == False)
+
+            rows = current.db(query).select(ttable.id)
+            event_ids = [row.id for row in rows]
+            if event_ids:
                 s3_set_default_filter("~.type_id",
-                                      row.id,
+                                      event_ids,
                                       tablename = "dvr_case_event",
                                       )
 
@@ -2586,13 +2598,20 @@ def config(settings):
                                     )
 
                 # Pivot axis options
-                report_axes = [(T("Date"), "date_day"),
+                report_axes = ["type_id",
+                               (T("Date"), "date_day"),
                                (T("Time of Day"), "date_tod"),
-                               "type_id",
                                "created_by",
                                ]
 
                 # Configure report options
+                code = r.get_vars.get("code")
+                if code and code[-1] != "*":
+                    # Single event type => group by ToD (legacy)
+                    default_cols = "date_tod"
+                else:
+                    # Group by type (standard behavior)
+                    default_cols = "type_id"
                 report_options = {
                     "rows": report_axes,
                     "cols": report_axes,
@@ -2600,7 +2619,7 @@ def config(settings):
                              #(T("Number of Events"), "count(id)"),
                              ],
                     "defaults": {"rows": "date_day",
-                                 "cols": "date_tod",
+                                 "cols": default_cols,
                                  "fact": "sum(quantity)",
                                  "totals": True,
                                  },
@@ -2621,7 +2640,7 @@ def config(settings):
             if callable(standard_postp):
                 output = standard_postp(r, output)
 
-            if r.method == "register":
+            if r.method in ("register", "register_food"):
                 from s3 import S3CustomController
                 S3CustomController._view("DRK", "register_case_event.html")
             return output
@@ -2630,6 +2649,36 @@ def config(settings):
         return attr
 
     settings.customise_dvr_case_event_controller = customise_dvr_case_event_controller
+
+    # -------------------------------------------------------------------------
+    def customise_dvr_case_event_type_resource(r, tablename):
+
+        T = current.T
+        s3db = current.s3db
+
+        from s3 import S3SQLCustomForm, \
+                       S3SQLInlineLink
+
+        crud_form = S3SQLCustomForm("code",
+                                    "name",
+                                    "is_inactive",
+                                    "is_default",
+                                    "role_required",
+                                    "appointment_type_id",
+                                    "min_interval",
+                                    "max_per_day",
+                                    S3SQLInlineLink("excluded_by",
+                                                    field = "excluded_by_id",
+                                                    label = T("Not Combinable With"),
+                                                    ),
+                                    "presence_required",
+                                    )
+
+        s3db.configure("dvr_case_event_type",
+                       crud_form = crud_form,
+                       )
+
+    settings.customise_dvr_case_event_type_resource = customise_dvr_case_event_type_resource
 
     # -------------------------------------------------------------------------
     def customise_dvr_site_activity_resource(r, tablename):
@@ -2809,10 +2858,44 @@ def config(settings):
             Custom restrictions in seized items form
         """
 
-        table = current.s3db.security_seized_item
+        from gluon import IS_IN_SET
+        from s3 import S3DateFilter, \
+                       S3OptionsFilter, \
+                       S3Represent, \
+                       S3TextFilter, \
+                       s3_get_filter_opts
 
+        s3db = current.s3db
+
+        table = s3db.security_seized_item
+
+        # Include ID in person field representation, and link to resident's
+        # file if permitted; +include ID in autocomplete-comment
         field = table.person_id
+        fmt = "%(pe_label)s %(last_name)s, %(first_name)s"
+        linkto = current.auth.permission.accessible_url(c = "dvr",
+                                                        f = "person",
+                                                        t = "pr_person",
+                                                        args = ["[id]"],
+                                                        extension = "",
+                                                        )
+        show_link = linkto is not False
+        field.represent = s3db.pr_PersonRepresent(fields = ("pe_label",
+                                                            "last_name",
+                                                            "first_name",
+                                                            ),
+                                                  labels = fmt,
+                                                  show_link = show_link,
+                                                  linkto = linkto or None,
+                                                  )
         field.comment = T("Enter some characters of the ID or name to start the search, then select from the drop-down")
+
+        # Customise options for status field
+        field = table.status
+        status_opts = s3db.security_seized_item_status_opts
+        status_opts["FWD"] = current.T("forwarded to RP")
+        field.requires = IS_IN_SET(status_opts, zero=None)
+        field.represent = S3Represent(options=status_opts)
 
         # Can't add item type from item form
         field = table.item_type_id
@@ -2821,6 +2904,61 @@ def config(settings):
         # Confiscated by not writable (always default)
         field = table.confiscated_by
         field.writable = False
+
+        if r.interactive:
+            # Custom filter Widgets
+            filter_widgets = [S3TextFilter(["person_id$pe_label",
+                                            "person_id$first_name",
+                                            "person_id$middle_name",
+                                            "person_id$last_name",
+                                            "status_comment",
+                                            "comments",
+                                            ],
+                                            label = T("Search"),
+                                            comment = T("Search by owner ID, name or comments"),
+                                           ),
+                              S3OptionsFilter("item_type_id",
+                                              options = s3_get_filter_opts(
+                                                  "security_seized_item_type",
+                                                  translate = True,
+                                                  ),
+                                              ),
+                              S3OptionsFilter("status",
+                                              options = status_opts,
+                                              cols = 2,
+                                              default = "DEP",
+                                              ),
+                              S3OptionsFilter("depository_id",
+                                              options = s3_get_filter_opts(
+                                                  "security_seized_item_depository",
+                                                  ),
+                                              ),
+                              S3DateFilter("date",
+                                           hidden = True,
+                                           ),
+                              S3DateFilter("person_id$dvr_case.closed_on",
+                                           hidden = True,
+                                           ),
+                              ]
+
+            s3db.configure("security_seized_item",
+                           filter_widgets = filter_widgets,
+                           )
+
+        # Custom list-fields on component tab
+        if r.tablename == "pr_person":
+            s3db.configure("security_seized_item",
+                           list_fields = ("person_id",
+                                          "date",
+                                          "number",
+                                          "item_type_id",
+                                          "confiscated_by",
+                                          "status",
+                                          "depository_id",
+                                          "returned_on",
+                                          "comments",
+                                          ),
+                           )
 
     settings.customise_security_seized_item_resource = customise_security_seized_item_resource
 
@@ -3544,12 +3682,14 @@ class DRKCaseEventDateAxes(object):
                 date = date.replace(tzinfo=self.UTC).astimezone(self.LOCAL)
                 hour = date.time().hour
 
-                if 7 <= hour < 11:
-                    tod = "07:00 - 11:00"
-                elif 11 <= hour < 15:
-                    tod = "11:00 - 15:00"
+                if 7 <= hour < 13:
+                    tod = "07:00 - 13:00"
+                elif 13 <= hour < 17:
+                    tod = "13:00 - 17:00"
+                elif 17 <= hour < 20:
+                    tod = "17:00 - 20:00"
                 else:
-                    tod = "15:00 - 07:00"
+                    tod = "20:00 - 07:00"
         else:
             tod = "-"
         return tod

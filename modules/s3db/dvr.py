@@ -3712,6 +3712,20 @@ class DVRCaseEventModel(S3Model):
                      s3_comments(),
                      *s3_meta_fields())
 
+        # Components
+        self.add_components(tablename,
+                            dvr_case_event = {"name": "excluded_by",
+                                              "link": "dvr_case_event_exclusion",
+                                              "joinby": "type_id",
+                                              "key": "excluded_by_id",
+                                              },
+                            )
+
+        # Table Configuration
+        configure(tablename,
+                  onaccept = self.case_event_type_onaccept,
+                  )
+
         # CRUD Strings
         crud_strings[tablename] = Storage(
             label_create = T("Create Event Type"),
@@ -3725,11 +3739,6 @@ class DVRCaseEventModel(S3Model):
             msg_record_deleted = T("Event Type deleted"),
             msg_list_empty = T("No Event Types currently defined"),
         )
-
-        # Table Configuration
-        configure(tablename,
-                  onaccept = self.case_event_type_onaccept,
-                  )
 
         # Reusable field
         represent = S3Represent(lookup=tablename, translate=True)
@@ -3746,6 +3755,29 @@ class DVRCaseEventModel(S3Model):
                                                               tooltip = T("Create a new event type"),
                                                               ),
                                         )
+
+        # ---------------------------------------------------------------------
+        # Case Event Types, Impermissible Combinations
+        #
+        tablename = "dvr_case_event_exclusion"
+        define_table(tablename,
+                     event_type_id(comment = None,
+                                   ondelete = "CASCADE",
+                                   ),
+                     event_type_id("excluded_by_id",
+                                   comment = None,
+                                   label = T("Not Combinable With"),
+                                   ondelete = "CASCADE",
+                                   ),
+                     *s3_meta_fields())
+
+        # Table Configuration
+        configure(tablename,
+                  deduplicate = S3Duplicate(primary = ("type_id",
+                                                       "excluded_by_id",
+                                                       ),
+                                            ),
+                  )
 
         # ---------------------------------------------------------------------
         # Case Events
@@ -3919,8 +3951,8 @@ class DVRCaseEventModel(S3Model):
         person_id = formvars.get("person_id")
         type_id = formvars.get("type_id")
 
-        if not person_id or \
-           close_appointments and (not case_id or not type_id):
+        if not person_id or not type_id or \
+           close_appointments and not case_id:
             # Reload the record
             table = s3db.dvr_case_event
             row = db(table.id == record_id).select(table.case_id,
@@ -3938,102 +3970,104 @@ class DVRCaseEventModel(S3Model):
         if not person_id:
             return
 
-        # Update last_seen
-        dvr_update_last_seen(person_id)
+        # Get the event type
+        ttable = s3db.dvr_case_event_type
+        query = (ttable.id == type_id) & \
+                (ttable.deleted == False)
+        event_type = db(query).select(ttable.presence_required,
+                                      ttable.appointment_type_id,
+                                      limitby = (0, 1),
+                                      ).first()
+        if not event_type:
+            return
+
+        # Update last_seen (if event type requires personal presence)
+        if event_type.presence_required:
+            dvr_update_last_seen(person_id)
 
         # Close appointments
-        if close_appointments and type_id:
-
-            atable = s3db.dvr_case_appointment
-            ttable = s3db.dvr_case_event_type
+        appointment_type_id = event_type.appointment_type_id
+        if close_appointments and appointment_type_id:
 
             today = current.request.utcnow.date()
 
-            left = atable.on((atable.type_id == ttable.appointment_type_id) & \
-                             (atable.person_id == person_id) & \
-                             ((atable.date == None) | (atable.date <= today)) & \
-                             (atable.deleted != True)
-                             )
-
-            query = (ttable.id == type_id) & \
-                    (ttable.appointment_type_id != None) & \
-                    (ttable.deleted != True)
+            atable = s3db.dvr_case_appointment
+            query = (atable.type_id == appointment_type_id) & \
+                    (atable.person_id == person_id) & \
+                    ((atable.date == None) | (atable.date <= today)) & \
+                    (atable.deleted == False)
 
             if case_id:
                 query &= (atable.case_id == case_id) | \
                          (atable.case_id == None)
-            rows = db(query).select(ttable.appointment_type_id,
-                                    atable.id,
+
+            rows = db(query).select(atable.id,
                                     atable.date,
                                     atable.status,
-                                    left = left,
                                     orderby = ~atable.date,
                                     )
 
             data = {"date": today, "status": 4}
-            if rows:
+
+            if not rows:
+
+                # No appointment of this type yet
+                # => create a new closed appointment
+                data["type_id"] = appointment_type_id
+                data["person_id"] = person_id
+                data["case_id"] = case_id
+
+                aresource = s3db.resource("dvr_case_appointment")
+                try:
+                    record_id = aresource.insert(**data)
+                except S3PermissionError:
+                    current.log.error("Event Registration: %s" % sys.exc_info()[1])
+
+            else:
                 update = None
-                create = False
 
-                first = rows[0].dvr_case_appointment
-                if first.id is None:
-                    # No appointment of this type yet
-                    create = True
+                # Find key dates
+                undated = open_today = closed_today = previous = None
 
-                else:
-                    # Find key dates
-                    undated = open_today = closed_today = previous = None
-                    for row in rows:
-                        appointment = row.dvr_case_appointment
-                        if appointment.date is None:
-                            if not undated:
-                                # An appointment without date
-                                undated = appointment
-                        elif appointment.date == today:
-                            if appointment.status != 4:
-                                # An open or cancelled appointment today
-                                open_today = appointment
-                            else:
-                                # A closed appointment today
-                                closed_today = appointment
-                        elif previous is None:
-                            # The last appointment before today
-                            previous = appointment
-
-                    if open_today:
-                        # If we have an open appointment for today, update it
-                        update = open_today
-                    elif closed_today:
-                        # If we already have a closed appointment for today,
-                        # do nothing
-                        update = None
-                    elif previous:
-                        if previous.status not in (1, 2, 3):
-                            # Last appointment before today is closed
-                            # => create a new one unless there is an undated one
-                            if undated:
-                                update = undated
-                            else:
-                                create = True
+                for row in rows:
+                    if row.date is None:
+                        if not undated:
+                            # An appointment without date
+                            undated = row
+                    elif row.date == today:
+                        if row.status != 4:
+                            # An open or cancelled appointment today
+                            open_today = row
                         else:
-                            # Last appointment before today is still open
-                            # => update it
-                            update = previous
+                            # A closed appointment today
+                            closed_today = row
+                    elif previous is None:
+                        # The last appointment before today
+                        previous = row
+
+                if open_today:
+                    # If we have an open appointment for today, update it
+                    update = open_today
+                elif closed_today:
+                    # If we already have a closed appointment for today,
+                    # do nothing
+                    update = None
+                elif previous:
+                    if previous.status not in (1, 2, 3):
+                        # Last appointment before today is closed
+                        # => create a new one unless there is an undated one
+                        if undated:
+                            update = undated
+                        else:
+                            create = True
                     else:
-                        update = undated
+                        # Last appointment before today is still open
+                        # => update it
+                        update = previous
+                else:
+                    update = undated
 
-                if create:
-                    # Create a new closed appointment
-                    data["type_id"] = rows[0].dvr_case_event_type.appointment_type_id
-                    data["person_id"] = person_id
-                    data["case_id"] = case_id
-                    aresource = s3db.resource("dvr_case_appointment")
-                    try:
-                        record_id = aresource.insert(**data)
-                    except S3PermissionError:
-                        current.log.error("Event Registration: %s" % sys.exc_info()[1])
-
-                elif update:
+                if update:
                     # Update the appointment
                     permitted = current.auth.s3_has_permission("update",
                                                                atable,
@@ -5661,10 +5695,13 @@ class DVRRegisterCaseEvent(S3Method):
 
                     {l: the actual PE label (to update the input field),
                      p: the person details,
+                     d: the family details,
                      f: [{n: the flag name
                           i: the flag instructions
                           },
                          ...],
+                     b: profile picture URL,
+                     i: {<event_code>: [<msg>, <blocked_until_datetime>]},
 
                      s: whether the action is permitted or not
 
@@ -5851,11 +5888,13 @@ class DVRRegisterCaseEvent(S3Method):
         # Event type header
         if event_type:
             event_type_name = T(event_type.name)
+            name_class = "event-type-name"
         else:
-            event_type_name = current.messages["NONE"]
+            event_type_name = T("Please select an event type")
+            name_class = "event-type-name placeholder"
 
         event_type_header = DIV(H4(SPAN(T(event_type_name),
-                                        _class = "event-type-name",
+                                        _class = name_class,
                                         ),
                                    SPAN(ICON("settings"),
                                         _class = "event-type-setting",
@@ -5954,9 +5993,21 @@ class DVRRegisterCaseEvent(S3Method):
             event_types = {}
             table = current.s3db.dvr_case_event_type
 
+            # Active event types
             query = (table.is_inactive == False) & \
                     (table.deleted == False)
 
+            # Excluded event codes
+            excluded = current.deployment_settings \
+                              .get_dvr_event_registration_exclude_codes()
+            if excluded:
+                for code in excluded:
+                    if "*" in code:
+                        query &= (~(table.code.like(code.replace("*", "%"))))
+                    else:
+                        query &= (table.code != code)
+
+            # Roles required
             sr = current.auth.get_system_roles()
             roles = current.session.s3.roles
             if sr.ADMIN not in roles:
@@ -5998,6 +6049,12 @@ class DVRRegisterCaseEvent(S3Method):
         s3db = current.s3db
 
         now = current.request.utcnow
+        day_start = now.replace(hour=0,
+                                minute=0,
+                                second=0,
+                                microsecond=0,
+                                )
+        next_day = day_start + datetime.timedelta(days=1)
 
         output = {}
 
@@ -6007,6 +6064,49 @@ class DVRRegisterCaseEvent(S3Method):
         # Get event types to check
         event_types = self.get_event_types()
 
+        # Check for impermissible combinations
+        etable = s3db.dvr_case_event_exclusion
+        query = (table.person_id == person_id) & \
+                (table.date >= day_start) & \
+                (table.deleted == False) & \
+                (etable.excluded_by_id == table.type_id) & \
+                (etable.deleted == False)
+        if type_id and event_types.get(type_id):
+            query &= etable.type_id == type_id
+
+        rows = db(query).select(etable.type_id,
+                                etable.excluded_by_id,
+                                )
+        excluded = {}
+        for row in rows:
+            tid = row.type_id
+            if tid in excluded:
+                excluded[tid].append(row.excluded_by_id)
+            else:
+                excluded[tid] = [row.excluded_by_id]
+
+        for tid, excluded_by_ids in excluded.items():
+            event_type = event_types.get(tid)
+            if not event_type:
+                continue
+            excluded_by_names = []
+            seen = set()
+            for excluded_by_id in excluded_by_ids:
+                if excluded_by_id in seen:
+                    continue
+                else:
+                    seen.add(excluded_by_id)
+                excluded_by_type = event_types.get(excluded_by_id)
+                if not excluded_by_type:
+                    continue
+                excluded_by_names.append(s3_str(T(excluded_by_type.name)))
+            if excluded_by_names:
+                msg = T("%(event)s already registered today, not combinable") % \
+                        {"event": ", ".join(excluded_by_names)
+                         }
+                output[tid] = (msg, next_day)
+
+        # Helper function to build event type sub-query
         def type_query(items):
             if len(items) == 1:
                 return (event_type_id == items[0])
@@ -6019,22 +6119,20 @@ class DVRRegisterCaseEvent(S3Method):
         q = None
         if type_id:
             event_type = event_types.get(type_id)
-            if event_type and event_type.max_per_day:
+            if event_type and \
+               event_type.max_per_day and \
+               type_id not in output:
                 q = type_query((type_id,))
         else:
             check = [tid for tid, row in event_types.items()
-                     if row.max_per_day and tid != "_default"
+                     if row.max_per_day and \
+                        tid != "_default" and tid not in output
                      ]
             q = type_query(check)
 
         if q is not None:
 
             # Get number of events per type for this person today
-            day_start = now.replace(hour=0,
-                                    minute=0,
-                                    second=0,
-                                    microsecond=0,
-                                    )
             cnt = table.id.count()
             query = (table.person_id == person_id) & q & \
                     (table.date >= day_start) & \
@@ -6045,7 +6143,6 @@ class DVRRegisterCaseEvent(S3Method):
                                     )
 
             # Check limit
-            next_day = day_start + datetime.timedelta(days=1)
             for row in rows:
 
                 number = row[cnt]
@@ -6055,10 +6152,15 @@ class DVRRegisterCaseEvent(S3Method):
                 limit = event_type.max_per_day
 
                 if number >= limit:
-                    msg = T("%(event)s already registered %(number)s times today") % \
-                            {"event": T(event_type.name),
-                             "number": number,
-                             }
+                    if number > 1:
+                        msg = T("%(event)s already registered %(number)s times today") % \
+                                {"event": T(event_type.name),
+                                 "number": number,
+                                 }
+                    else:
+                        msg = T("%(event)s already registered today") % \
+                                {"event": T(event_type.name),
+                                 }
                     output[tid] = (msg, next_day)
 
         # Check minimum intervals

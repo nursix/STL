@@ -939,7 +939,7 @@ S3.search = {};
      * updateOptions: Update the options of all filter widgets
      */
     var updateOptions = function(options) {
-        
+
         var filter_id;
         for (filter_id in options) {
             var widget = $('#' + filter_id);
@@ -1850,6 +1850,26 @@ S3.search = {};
     };
 
     /**
+     * Event handler for the dataChanged event: data of a filter
+     * target have changed => update filter options accordingly
+     *
+     * @param {string} targetID - the filter target ID
+     */
+    var dataChanged = function(targetID) {
+
+        if (targetID) {
+
+            var target = $(this).find('input.filter-submit-target').val();
+            if (target) {
+                targets = target.split(' ');
+                if (targets.length && $.inArray(targetID + '', targets) != -1) {
+                    S3.search.ajaxUpdateOptions(this);
+                }
+            }
+        }
+    };
+
+    /**
      * document-ready script
      */
     $(document).ready(function() {
@@ -1891,6 +1911,14 @@ S3.search = {};
         // Manual form submission
         $('.filter-submit').click(function() {
             filterSubmit($(this).closest('.filter-form'));
+        });
+
+        // Handle external target data updates
+        // (e.g. add/update popups, or jeditable-Ajax)
+        $('.filter-form').on('dataChanged', function(e, targetID) {
+            dataChanged.call(this, targetID);
+            // No need (currently) to let this bubble up:
+            return false;
         });
 
         // Advanced button
@@ -1973,7 +2001,7 @@ S3.search = {};
                 optgroups += '</optgroup>';
             }
             // @ToDo: i18n
-            $this.before('<div class="range-coarse">From:<select id="' + widget_name + '-cs">' + optgroups + '</select>to:<select id="' + widget_name + '-ce">' + optgroups + '</select></div>');
+            $this.before('<div class="range-coarse"><div class="range-coarse-start"><label for="' + widget_name + '-cs">From:</label><select id="' + widget_name + '-cs">' + optgroups + '</select></div><div class="range-coarse-end"><label for="' + widget_name + '-ce">to:</label><select id="' + widget_name + '-ce">' + optgroups + '</select></div></div>');
             var coarseStart = $('#' + widget_name + '-cs');
             var coarseEnd = $('#' + widget_name + '-ce');
             coarseStart.val(minDate.format(cfmt));
@@ -1997,22 +2025,30 @@ S3.search = {};
                     values.push({x: label, y: v[1]});
                 }
 
+                // Store the Values as used in multiple places
+                $this.data('slots', values);
+
                 // Line chart data should be sent as an array of series objects.
                 return [{values: values,   // values - represents the array of {x,y} data points
                          key: '',          // key  - the name of the series.
-                         color: '#9eb5d5', // color - optional: choose your own line color.
+                         // @ToDo: deployment_setting: use same as the one that enables...or copy from another CSS element?
+                         color: '#3b6596', // color - optional: choose your own line color.
                          area: true        // area - set to true if you want this line to turn into a filled area chart.
                          },
                         ];
             }
+            // Store the initial values for Play button
+            slotsData();
 
             // Play Button
             // @ToDo: widget & deployment settings
             // @ToDo: Make this sensitive to changing of Icon sets
             // @ToDo: i18n
-            $this.before('<a class="button secondary tiny play"><i class="fa fa-play"></i> Play</a>');
+            $this.before('<a class="button secondary tiny play"><i class="fa fa-play"></i> Play</a><a class="button secondary tiny hide pause"><i class="fa fa-pause"></i> Pause</a><a class="button secondary tiny hide stop"><i class="fa fa-stop"></i> Stop</a>');
             var play = $('#' + widget_name + ' .play'),
-                slots = slotsData()[0].values;
+                pause = $('#' + widget_name + ' .pause'),
+                stop = $('#' + widget_name + ' .stop'),
+                slots = $this.data('slots');
             if (slots.length < 3) {
                 // Hide the Play button as it doesn't work for such a small number of values
                 play.hide();
@@ -2052,12 +2088,12 @@ S3.search = {};
             rangePicker.graph = function() {
                 nv.addGraph(function() {
                     var chart = nv.models.lineChart()
-                                  //.margin({left: 100})  // Adjust chart margins to give the x-axis some breathing room.
+                                  .margin({left: 0, right: 0})      // Adjust chart margins to give the x-axis some breathing room.
                                   //.useInteractiveGuideline(true)  // We want nice looking tooltips and a guideline!
-                                  //.transitionDuration(350)  // how fast do you want the lines to transition?
+                                  //.transitionDuration(350)        // how fast do you want the lines to transition?
                                   .showLegend(false)       // Hide the legend (would allow users to turn on/off line series)
                                   .showYAxis(false)        // Hide the y-axis
-                                  .showXAxis(false)        // Show the x-axis
+                                  .showXAxis(false);       // Show the x-axis
 
                      chart.tooltip.contentGenerator(tooltipContent);
 
@@ -2072,7 +2108,7 @@ S3.search = {};
                     // Done setting the chart up? Time to render it!
                     var myData = slotsData();   // You need data...
 
-                    d3.select('#' + widget_name + '-chart svg')  // Select the <svg> element you want to render the chart in.   
+                    d3.select('#' + widget_name + '-chart svg')  // Select the <svg> element you want to render the chart in.
                       .datum(myData)         // Populate the <svg> element with chart data...
                       .call(chart);          // Finally, render the chart!
 
@@ -2177,7 +2213,9 @@ S3.search = {};
                                      });
                 $this.data('ts', ts);
                 rangePicker.graph();
-                slots = slotsData()[0].values;
+                // Store the new values for Play button
+                //slotsData(); // If the .graph() is hidden by settings but Play is present then need to do this
+                slots = $this.data('slots');
                 if (slots.length > 2) {
                     // Ensure Play button is visible in case it was previously hidden
                     play.show();
@@ -2188,33 +2226,73 @@ S3.search = {};
             });
 
             // Play button
-            // @ToDo: Make wait time configurable (use same setting as on/off)
-            var slot_wait = 4000;
-            function playSlot(i) {
-                var start = slots[i].x;
+            // @ToDo: Make slot_speed configurable (use same setting as on/off)
+            var slot_speed = 4000,
+                slot_wait = 0,    // 1st will happen immediately
+                timers = [];
+            function playSlot(slot) {
+                var start = slots[slot].x;
                 try {
-                    var end = slots[i + 1].x;
+                    var end = slots[slot + 1].x;
                 } catch(e) {
                     // Final slot
                     var end =  moment($this.data('max'));
                 }
-                var timeout = i * slot_wait; // 1st will happen immediately
-                setTimeout(function() {
-                    setSlot(start, end);
+                var timeout = slot_wait;
+                slot_wait = slot_wait + slot_speed;
+                var timer = setTimeout(function() {
+                    setSlot(slot, start, end);
                 }, timeout);
+                timers.push(timer);
             }
-            function setSlot(start, end) {
+            function setSlot(slot, start, end) {
+                $this.data('slot', slot);
                 startField.val(start.format(fmt));
                 endField.val(end.format(fmt));
                 startField.trigger('change');
             }
+            // First Play should start at the beginning
+            $this.data('slot', 0);
             play.on('click', function() {
+                // Start Play from the correct slot
+                var slot = $this.data('slot');
+                // Hide Play
+                play.hide();
+                // Unhide Pause & Stop
+                pause.removeClass('hide').show();
+                stop.removeClass('hide').show();
                 // Move the slider through each of the slots at the defined interval
-                slots = slotsData()[0].values;
-                for (var i = 0; i < slots.length; i++) {
-                    playSlot(i);
+                slots = $this.data('slots');
+                for (slot; slot < slots.length; slot++) {
+                    playSlot(slot);
                 }
-            })
+            });
+            pause.on('click', function() {
+                // Stop Playback
+                for (var i = 0; i < timers.length; i++) {
+                    clearTimeout(timers.pop());
+                }
+                // Reset Wait (so we don't have long pause for initial resume)
+                slot_wait = 0;
+                // Hide Pause
+                pause.hide();
+                // Show Play
+                play.show();
+            });
+            stop.on('click', function() {
+                // Stop Playback
+                for (var i = 0; i < timers.length; i++) {
+                    clearTimeout(timers.pop());
+                }
+                // Future Plays should start at the beginning
+                $this.data('slot', 0);
+                slot_wait = 0;
+                // Hide Pause & Stop
+                pause.hide();
+                stop.hide();
+                // Show Play
+                play.show();
+            });
         });
 
         // Don't submit if pressing Enter

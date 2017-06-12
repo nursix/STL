@@ -1038,12 +1038,9 @@ class S3Config(Storage):
 
     def get_gis_api_google(self):
         """
-            API key for Google
-            - needed for Earth, MapMaker & GeoCoder
-            - defaults to localhost
+            API key for Google Maps
         """
-        return self.gis.get("api_google",
-                            "ABQIAAAAgB-1pyZu7pKAZrMGv3nksRTpH3CbXHjuCVmaTc5MkkU4wO1RRhQWqp1VGwrG8yPE2KhLCPYhD7itFw")
+        return self.gis.get("api_google", "")
 
     def get_gis_bbox_min_size(self):
         """
@@ -2961,6 +2958,16 @@ class S3Config(Storage):
         """
         return self.dvr.get("event_registration_show_picture", True)
 
+    def get_dvr_event_registration_exclude_codes(self):
+        """
+            List of case event type codes to exclude from
+            the event registration UI; can use * as wildcard
+
+            Example:
+                settings.dvr.event_registration_exclude_codes = ("FOOD*",)
+        """
+        return self.dvr.get("event_registration_exclude_codes", None)
+
     def get_dvr_activity_use_service_type(self):
         """
             Use service type in case activities
@@ -4370,6 +4377,12 @@ class S3Config(Storage):
             Use Indicators in Projects
         """
         return self.project.get("indicators", False)
+
+    def get_project_indicator_criteria(self):
+        """
+            Use Indicator Criteria in Projects
+        """
+        return self.project.get("indicator_criteria", False)
 
     #def get_project_locations_from_countries(self):
     #    """

@@ -1378,6 +1378,7 @@ class S3CalendarWidget(FormWidget):
                  minute_step=5,
                  set_min=None,
                  set_max=None,
+                 clear_text=None,
                  ):
         """
             Constructor
@@ -1442,6 +1443,8 @@ class S3CalendarWidget(FormWidget):
         self.set_min = set_min
         self.set_max = set_max
 
+        self.clear_text = clear_text
+
         self._class = "s3-calendar-widget datetimepicker"
 
     # -------------------------------------------------------------------------
@@ -1504,6 +1507,11 @@ class S3CalendarWidget(FormWidget):
         extremes = self.extremes(dtformat=dtformat)
 
         T = current.T
+        clear_text = self.clear_text
+        if clear_text is None:
+            clear_text = s3_str(T("Clear"))
+        else:
+            clear_text = s3_str(T(clear_text))
         options = {"calendar": calendar,
                    "dateFormat": str(date_format),
                    "timeFormat": str(time_format),
@@ -1515,10 +1523,10 @@ class S3CalendarWidget(FormWidget):
                    "weekNumber": self.week_number,
                    "timepicker": self.timepicker,
                    "minuteStep": self.minute_step,
-                   "todayText": str(T("Today")),
-                   "nowText": str(T("Now")),
-                   "closeText": str(T("Done")),
-                   "clearText": str(T("Clear")),
+                   "todayText": s3_str(T("Today")),
+                   "nowText": s3_str(T("Now")),
+                   "closeText": s3_str(T("Done")),
+                   "clearText": clear_text,
                    "setMin": self.set_min,
                    "setMax": self.set_max,
                    }
@@ -8861,11 +8869,13 @@ class ICON(I):
             "org-network": "fa-umbrella",
             "other": "fa-circle",
             "paper-clip": "fa-paperclip",
+            "pause": "fa-pause",
             "pencil": "fa-pencil",
             "phone": "fa-phone",
             "play": "fa-play",
             "plus": "fa-plus",
             "plus-sign": "fa-plus-sign",
+            "print": "fa-print",
             "project": "fa-dashboard",
             "radio": "fa-microphone",
             "remove": "fa-remove",
@@ -8880,6 +8890,7 @@ class ICON(I):
             "skype": "fa-skype",
             "staff": "fa-user",
             "star": "fa-star",
+            "stop": "fa-stop",
             "table": "fa-table",
             "tag": "fa-tag",
             "tags": "fa-tags",
@@ -8940,6 +8951,7 @@ class ICON(I):
             "org-network": "fi-asterisk",
             "other": "fi-asterisk",
             "paper-clip": "fi-paperclip",
+            "pause": "fi-pause",
             "pencil": "fi-pencil",
             "phone": "fi-telephone",
             "play": "fi-play",
@@ -8957,6 +8969,7 @@ class ICON(I):
             "site": "fi-home",
             "skype": "fi-social-skype",
             "star": "fi-star",
+            "stop": "fi-stop",
             "table": "fi-list-thumbnails",
             "tag": "fi-price-tag",
             "tags": "fi-pricetag-multiple",
@@ -9017,6 +9030,7 @@ class ICON(I):
             "org-network": "icon-umbrella",
             "other": "icon-circle",
             "paper-clip": "icon-paper-clip",
+            "pause": "icon-pause",
             "pencil": "icon-pencil",
             "phone": "icon-phone",
             "play": "icon-play",
@@ -9034,6 +9048,7 @@ class ICON(I):
             "site": "icon-home",
             "skype": "icon-skype",
             "star": "icon-star",
+            "stop": "icon-stop",
             "table": "icon-table",
             "tag": "icon-tag",
             "tags": "icon-tags",
