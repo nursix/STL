@@ -1105,7 +1105,7 @@ class S3CRUD(S3Method):
     # -------------------------------------------------------------------------
     def select(self, r, **attr):
         """
-            Filtered datatable/datalist
+            Filterable datatable/datalist
 
             @param r: the S3Request
             @param attr: dictionary of parameters for the method handler
@@ -2077,10 +2077,11 @@ class S3CRUD(S3Method):
         if "resource" in get_vars:
             tablename = get_vars["resource"]
 
-            # Customise the resource
-            customise = current.deployment_settings.customise_resource(tablename)
-            if customise:
-                customise(r, tablename)
+            if tablename != "%s_%s" % (r.controller, r.function):
+                # Customise the resource
+                customise = current.deployment_settings.customise_resource(tablename)
+                if customise:
+                    customise(r, tablename)
 
             components = [alias] if alias else None
             try:

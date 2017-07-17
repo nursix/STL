@@ -342,11 +342,23 @@ OpenLayers.ProxyHost = S3.Ap.concat('/gis/proxy?url=');
             layers = map.layers;
             for (i=0, len=layers.length; i < len; i++) {
                 layer = layers[i];
-                if (layer.s3_layer_id == layer_id) {
-                    url = layer.protocol.url;
+                if (layer && (layer.s3_layer_id == layer_id)) {
                     // Apply any URL filters
-                    url = S3.search.filterURL(url, queries);
-                    layer.protocol.options.url = url;
+                    if (queries.length) {
+                        url = layer.protocol.url;
+                        url = S3.search.filterURL(url, queries);
+                        //layer.protocol.options.url = url;
+                        // Convert to POST
+                        var ajax_options = {data: [],
+                                            type: 'GET',
+                                            url: url,
+                                            };
+                        S3.search.searchRewriteAjaxOptions(ajax_options, 'form');
+                        var protocol_options = layer.protocol.options;
+                        protocol_options.params = ajax_options['data'];
+                        protocol_options.readWithPOST = true;
+                        protocol_options.url = ajax_options['url'];
+                    }
                     // If map is showing then refresh the layer
                     if (map.s3.mapWin.isVisible()) {
                         // Set an event to re-enable Clustering when the layer is reloaded
@@ -378,6 +390,10 @@ OpenLayers.ProxyHost = S3.Ap.concat('/gis/proxy?url=');
                         } else {
                             // Show the Layer
                             layer.setVisibility(true);
+                        }
+                        if (undefined != map.s3.layerRefreshed) {
+                            // Call Custom Call-back
+                            map.s3.layerRefreshed(layer);
                         }
                     }
                 }
@@ -1976,6 +1992,12 @@ OpenLayers.ProxyHost = S3.Ap.concat('/gis/proxy?url=');
             s3.layers_nopopups.push(name);
         }
         var url = layer.url;
+        if (url.indexOf('$search') !== -1) {
+            // Use POSTs to retrieve data allowing arbitrary length of filter options as well as TLS encryption of filters
+            var readWithPOST = true;
+        } else {
+            var readWithPOST = false;
+        }
         if (undefined != layer.refresh) {
             var refresh = layer.refresh;
         } else {
@@ -2106,7 +2128,8 @@ OpenLayers.ProxyHost = S3.Ap.concat('/gis/proxy?url=');
                 projection: projection,
                 protocol: new OpenLayers.Protocol.HTTP({
                     url: url,
-                    format: format_geojson
+                    format: format_geojson,
+                    readWithPOST: readWithPOST
                 }),
                 // This gets picked up after mapPanel instantiates & copied to it's layerRecords
                 legendURL: marker_url,
@@ -4983,7 +5006,8 @@ OpenLayers.ProxyHost = S3.Ap.concat('/gis/proxy?url=');
 
     // Polygon Control to select Areas on the Map
     var addPolygonControl = function(map, toolbar, active, not_regular, config) {
-        var draftLayer = map.s3.draftLayer;
+        var s3 = map.s3,
+            draftLayer = s3.draftLayer;
         var control = new OpenLayers.Control.DrawFeature(draftLayer,
             not_regular ? OpenLayers.Handler.Polygon :
                           OpenLayers.Handler.RegularPolygon, {
@@ -4994,8 +5018,8 @@ OpenLayers.ProxyHost = S3.Ap.concat('/gis/proxy?url=');
             // custom Callback
             'featureAdded': function(feature) {
                 // Remove previous polygon
-                if (map.s3.lastDraftFeature) {
-                    map.s3.lastDraftFeature.destroy();
+                if (s3.lastDraftFeature) {
+                    s3.lastDraftFeature.destroy();
                 } else if (draftLayer.features.length > 1) {
                     // Clear the one from the Current Location in S3LocationSelector
                     draftLayer.features[0].destroy();
@@ -5003,29 +5027,31 @@ OpenLayers.ProxyHost = S3.Ap.concat('/gis/proxy?url=');
                 var wkt_field = $('#gis_location_wkt');
                 if (wkt_field.length) {
                     // Update form fields in S3LocationSelectorWidget
-                    // (S3LocationSelector does this in s3.ui.locationselector.js, which is a better design)
+                    // (S3LocationSelector uses the map.s3.pointPlaced hook in s3.ui.locationselector.js, which is a better design)
                     var WKT = feature.geometry.transform(map.getProjectionObject(), proj4326).toString();
                     wkt_field.val(WKT);
                     $('#gis_location_lat').val('');
                     $('#gis_location_lon').val('');
-                } else {
+                }
+                /* Old S3Search
+                else {
                     // See if we have a relevant Search Filter
                     var wkt_search_field = $('#gis_search_polygon_input');
                     if (wkt_search_field.length) {
                         var WKT = feature.geometry.transform(map.getProjectionObject(), proj4326).toString();
                         wkt_search_field.val(WKT).trigger('change');
                     }
-                }
+                }*/
                 // Destroy all popups
                 while (map.popups.length > 0) {
                     map.removePopup(map.popups[0]);
                 }
-                if (undefined != map.s3.pointPlaced) {
+                if (undefined != s3.pointPlaced) {
                     // Call Custom Call-back
-                    map.s3.pointPlaced(feature, config);
+                    s3.pointPlaced(feature, config);
                 }
                 // Prepare in case user draws a new polygon
-                map.s3.lastDraftFeature = feature;
+                s3.lastDraftFeature = feature;
             }
         });
 
@@ -5036,21 +5062,38 @@ OpenLayers.ProxyHost = S3.Ap.concat('/gis/proxy?url=');
             } else {
                 var tooltip = i18n.gis_draw_polygon;
             }
-            var map_id = map.s3.id;
+            var map_id = s3.id;
             var polygonButton = new GeoExt.Action({
                 control: control,
-                handler: function(){
-                    if (polygonButton.items[0].pressed) {
+                handler: function() {
+                    var btn = polygonButton.items[0];
+                    if (btn.pressed) {
+                        polygonButton.setIconClass('drawpolygonclear-off');
+                        btn.tooltip = i18n.gis_draw_polygon_clear;
+                        btn.setTooltip(i18n.gis_draw_polygon_clear);
                         $('#' + map_id + '_panel .olMapViewport').addClass('crosshair');
                         var colorpicker = $('#' + map_id + '_panel .gis_colorpicker');
                         if (colorpicker.length) {
                             colorpicker.spectrum('enable');
                         }
                     } else {
+                        polygonButton.setIconClass('drawpolygon-off');
+                        btn.tooltip = tooltip;
+                        btn.setTooltip(tooltip);
                         $('#' + map_id + '_panel .olMapViewport').removeClass('crosshair');
                         var colorpicker = $('#' + map_id + '_panel .gis_colorpicker');
                         if (colorpicker.length) {
                             colorpicker.spectrum('disable');
+                        }
+                        if (s3.lastDraftFeature) {
+                            s3.lastDraftFeature.destroy();
+                        } else if (draftLayer.features.length > 1) {
+                            // Clear the one from the Current Location in S3LocationSelector
+                            draftLayer.features[0].destroy();
+                        }
+                        if (undefined != s3.polygonButtonOff) {
+                            // Call Custom Call-back (used by S3MapFilter)
+                            s3.polygonButtonOff();
                         }
                     }
                 },
@@ -5065,14 +5108,14 @@ OpenLayers.ProxyHost = S3.Ap.concat('/gis/proxy?url=');
                 deactivateOnDisable: true
             });
             toolbar.add(polygonButton);
-            // Pass to Global scope for LocationSelectorWidget
-            map.s3.polygonButton = polygonButton;
+            // Pass to Global scope for LocationSelectorWidget & S3MapFilter
+            s3.polygonButton = polygonButton;
         } else {
             // Simply add straight to the map
             map.addControl(control);
             if (active) {
                 control.activate();
-                $('#' + map.s3.id + '_panel .olMapViewport').addClass('crosshair');
+                $('#' + s3.id + '_panel .olMapViewport').addClass('crosshair');
             }
         }
     };

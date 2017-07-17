@@ -36,6 +36,7 @@ __all__ = ("S3DateFilter",
            "S3FilterWidget",
            "S3HierarchyFilter",
            "S3LocationFilter",
+           "S3MapFilter",
            "S3OptionsFilter",
            "S3RangeFilter",
            "S3SliderFilter",
@@ -1490,28 +1491,53 @@ class S3LocationFilter(S3FilterWidget):
             joined = False
 
         elif selector:
+
             # Lookup options from resource
             rfield = S3ResourceField(resource, selector)
             if not rfield.field or rfield.ftype != ftype:
                 # Must be a real reference to gis_location
                 return default
+
             fields = [selector] + ["%s$%s" % (selector, l) for l in levels]
             if translate:
                 fields.append("%s$path" % selector)
+
+            # Always joined (gis_location foreign key in resource)
             joined = True
+
+            # Reduce multi-table joins by excluding empty FKs
+            resource.add_filter(FS(selector) != None)
+
             # Filter out old Locations
             # @ToDo: Allow override
-            resource.add_filter(FS("%s.end_date" % selector) == None)
+            resource.add_filter(FS("%s$end_date" % selector) == None)
 
         else:
             # Neither fixed options nor resource to look them up
             return default
 
+        # Prevent unnecessary extraction of extra fields
+        extra_fields = resource.get_config("extra_fields")
+        resource.clear_config("extra_fields")
+
+        # Suppress instantiation of LazySets in rows (we don't need them)
+        db = current.db
+        rname = db._referee_name
+        db._referee_name = None
+
         # Find the options
-        rows = resource.select(fields=fields,
-                               limit=None,
-                               virtual=False,
-                               as_rows=True)
+        rows = resource.select(fields = fields,
+                               limit = None,
+                               virtual = False,
+                               as_rows = True,
+                               )
+
+        # Restore extra fields
+        resource.configure(extra_fields=extra_fields)
+
+        # Restore referee name
+        db._referee_name = rname
+
         rows2 = []
         if not rows:
             if values:
@@ -1722,6 +1748,102 @@ class S3LocationFilter(S3FilterWidget):
 
         selectors = selector.split("|")
         return ["%s__%s" % (selector, operator) for selector in selectors]
+
+# =============================================================================
+class S3MapFilter(S3FilterWidget):
+    """
+        Map filter widget
+         Normally configured for "~.location_id$the_geom"
+
+        Configuration options:
+
+        @keyword label: label for the widget
+        @keyword comment: comment for the widget
+        @keyword hidden: render widget initially hidden (="advanced" option)
+    """
+
+    _class = "map-filter"
+
+    operator = "intersects"
+
+    # -------------------------------------------------------------------------
+    def widget(self, resource, values):
+        """
+            Render this widget as HTML helper object(s)
+
+            @param resource: the resource
+            @param values: the search values from the URL query
+        """
+
+        if not current.deployment_settings.get_gis_spatialdb():
+            current.log.warning("No Spatial DB => Cannot do Intersects Query yet => Disabling S3MapFilter")
+            return ""
+
+        attr = self.attr
+
+        if "_class" in attr and attr["_class"]:
+            _class = "%s %s" % (attr["_class"], self._class)
+        else:
+            _class = self._class
+
+        _id = attr["_id"]
+
+        # Hidden INPUT to store the WKT
+        input = INPUT(_type="hidden",
+                      _class=_class,
+                      _id = _id,
+                      )
+
+        # Populate with the value, if given
+        if values not in (None, []):
+            if type(values) is list:
+                values = values[0]
+            input["_value"] = values
+
+        # Map Widget
+        map_id = "%s-map" % _id
+
+        c, f = resource.tablename.split("_", 1)
+        c = attr.get("controller", c)
+        f = attr.get("function", f)
+
+        ltable = current.s3db.gis_layer_feature
+        query = (ltable.controller == c) & \
+                (ltable.function == f) & \
+                (ltable.deleted == False)
+        layer = current.db(query).select(ltable.layer_id,
+                                         ltable.name,
+                                         limitby=(0, 1)
+                                         ).first()
+        try:
+            layer_id = layer.layer_id
+        except:
+            # No prepop done?
+            layer_id = None
+            layer_name = resource.tablename
+        else:
+            layer_name = layer.name
+
+        feature_resources = [{"name"     : current.T(layer_name),
+                              "id"       : "search_results",
+                              "layer_id" : layer_id,
+                              "filter"   : attr.get("filter"),
+                              },
+                             ]
+
+        _map = current.gis.show_map(id = map_id,
+                                    height = attr.get("height", 350),
+                                    width = attr.get("width", 425),
+                                    collapsed = True,
+                                    callback='''S3.search.s3map('%s')''' % map_id,
+                                    feature_resources = feature_resources,
+                                    toolbar = True,
+                                    add_polygon = True,
+                                    )
+
+        return TAG[""](input,
+                       _map,
+                       )
 
 # =============================================================================
 class S3OptionsFilter(S3FilterWidget):
