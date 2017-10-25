@@ -140,38 +140,39 @@ table.embeddedComponent input.integer {
 .inline-throbber {
     background-image: url(../../img/indicator.gif);
     background-repeat: no-repeat;
+    background-position: center;
     height: 16px;
     width: 16px;
+}
+.inline-add,
+.inline-dsc,
+.inline-cnc,
+.inline-edt,
+.inline-rdy,
+.inline-rmv {
+    cursor: pointer;
+    background-repeat: no-repeat;
+    background-position: center;
+    height: 23px;
+    width: 23px;
 }
 .inline-add {
     background-image: url(../../img/crud/add.png);
-    background-repeat: no-repeat;
-    height: 23px;
-    width: 23px;
+}
+.inline-dsc {
+    background-image: url(../../img/crud/cancel.png);
 }
 .inline-cnc {
     background-image: url(../../img/crud/cancel.png);
-    background-repeat: no-repeat;
-    height: 16px;
-    width: 16px;
 }
 .inline-edt {
     background-image: url(../../img/crud/edit.png);
-    background-repeat: no-repeat;
-    height: 22px;
-    width: 22px;
 }
 .inline-rdy {
     background-image: url(../../img/crud/apply.png);
-    background-repeat: no-repeat;
-    height: 16px;
-    width: 16px;
 }
 .inline-rmv {
     background-image: url(../../img/crud/remove.png);
-    background-repeat: no-repeat;
-    height: 23px;
-    width: 23px;
 }
 
 .s3_inline_add_resource_link a {
@@ -604,13 +605,11 @@ body.popup {
 #popup {
     max-width: 750px;
     width: 100%;
+    /* Popup contents initially hidden until iframe resized to fit modal */
+    display: none;
 }
 .loading {
     background: url(../../img/ajax-loader.gif) center no-repeat !important;
-}
-#popup form {
-    /* Form initially hidden until resized to fit modal */
-    display: none;
 }
 #popup .form-container {
     /* Ensure scrollbars are all on the Modal, not inside */

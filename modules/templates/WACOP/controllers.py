@@ -25,7 +25,7 @@ class index(S3CustomController):
         events = custom._events_html()
 
         # Map of Incidents
-        _map = custom._map("Incidents")
+        _map, button = custom._map("Incidents")
 
         # Output
         output = {"alerts": alerts,
@@ -99,7 +99,9 @@ class custom_WACOP(S3CRUD):
                    event_id = None,
                    incident_id = None,
                    ajax_vars = None, # Used to be able to differentiate contexts in customise()
+                                     # & for filter_defaults
                    dt_init = None,
+                   resource = None,
                    ):
         """
             Update output with a dataTable and a create_popup
@@ -113,7 +115,8 @@ class custom_WACOP(S3CRUD):
 
         if ajax_vars is None:
             ajax_vars = {}
-        resource = s3db.resource(tablename)
+        if resource is None:
+            resource = s3db.resource(tablename)
         if event_id:
             ltablename = "event_%s" % f
             if tablename == ltablename:
@@ -296,35 +299,61 @@ class custom_WACOP(S3CRUD):
 
             @param layer_name: the name of the Layer
             @param map_id: the id of the map
-            @param filter: optional filter
+            @param filter: True for an S3MapFilter, otherwise optional filter string for the layer
         """
 
-        ltable = current.s3db.gis_layer_feature
-        layer = current.db(ltable.name == layer_name).select(ltable.layer_id,
-                                                             limitby=(0, 1)
-                                                             ).first()
-        try:
-            layer_id = layer.layer_id
-        except:
-            # No prepop done?
-            layer_id = None
-        feature_resources = [{"name"     : current.T(layer_name),
-                              "id"       : "search_results",
-                              "layer_id" : layer_id,
-                              "filter"   : filter,
-                              },
-                             ]
-        map = current.gis.show_map(id = map_id,
-                                   height = 350,
-                                   width = 425,
-                                   collapsed = True,
-                                   callback='''S3.search.s3map('%s')''' % map_id,
-                                   feature_resources = feature_resources,
-                                   #toolbar = True,
-                                   #add_polygon = True,
-                                   )
+        s3 = current.response.s3
+        jqrappend = s3.jquery_ready.append
 
-        return map
+        if filter is True and current.deployment_settings.get_gis_spatialdb():
+            # Using S3MapFilter
+            _map = None
+
+            button = A("DRAW A MAP AREA",
+                       _class="button wide",
+                       _id="map_filter_button",
+                       )
+
+            # Move Map into the Design
+            jqrappend('''$('#%s').appendTo($('#map-here'))''' % map_id)
+
+            # Apply custom design to the S3MapFilter
+            s3.scripts.append("/%s/static/themes/WACOP/js/map_filter.js" % current.request.application)
+            jqrappend('''S3.wacop_mapFilter('%s')''' % map_id)
+
+        else:
+            # Map without S3MapFilter
+            button = None
+
+            ltable = current.s3db.gis_layer_feature
+            layer = current.db(ltable.name == layer_name).select(ltable.layer_id,
+                                                                 limitby=(0, 1)
+                                                                 ).first()
+            try:
+                layer_id = layer.layer_id
+            except:
+                # No prepop done?
+                layer_id = None
+            feature_resources = [{"name"     : current.T(layer_name),
+                                  "id"       : "search_results",
+                                  "layer_id" : layer_id,
+                                  "filter"   : filter,
+                                  },
+                                 ]
+            _map = current.gis.show_map(id = map_id,
+                                        height = 350,
+                                        width = 425,
+                                        collapsed = True,
+                                        callback='''S3.search.s3map('%s')''' % map_id,
+                                        feature_resources = feature_resources,
+                                        #toolbar = True,
+                                        #add_polygon = True,
+                                        )
+
+        # Resize the map to match the height of the Filter Form
+        jqrappend('''S3.wacop_resizeMap('%s')''' % map_id)
+
+        return _map, button
 
     # -------------------------------------------------------------------------
     @staticmethod
@@ -732,6 +761,86 @@ class custom_WACOP(S3CRUD):
         return system_wide
 
     # -------------------------------------------------------------------------
+    def _tasks_html(self,
+                    r,
+                    output,
+                    updateable = True,
+                    event_id = None,
+                    incident_id = None,
+                    dt_init = None,
+                    ):
+        """
+            Create the HTML for the Tasks section
+
+            @param r: the S3Request
+        """
+
+        tablename = "project_task"
+        dataTable_id = "custom-list-%s" % tablename
+        ajax_vars = {#"list_id": dataTable_id,
+                     #"refresh": dataTable_id,
+                     }
+
+        s3db = current.s3db
+        resource = s3db.resource(tablename)
+        if event_id:
+            # Done by _datatable
+            #resource.add_filter(FS("event_task.event_id") == event_id)
+            ajax_vars["event_task.event_id"] = event_id
+        elif incident_id:
+            # Done by _datatable
+            #resource.add_filter(FS("event_task.incident_id") == incident_id)
+            ajax_vars["event_task.incident_id"] = incident_id
+        ajaxurl = URL(c="project", f="task", args="datatable",
+                      vars=ajax_vars, extension="aadata")
+
+        customise = current.deployment_settings.customise_resource(tablename)
+        if customise:
+            customise(r, tablename)
+
+        default_filters = S3FilterForm.apply_filter_defaults(r, resource)
+
+        self._datatable(output = output,
+                        tablename = tablename,
+                        search = False,
+                        updateable = updateable,
+                        event_id = event_id,
+                        incident_id = incident_id,
+                        ajax_vars = default_filters,
+                        dt_init = dt_init,
+                        resource = resource,
+                        )
+
+        # Filter Form
+        # Widgets defined in customise() to be visible to filter.options
+        filter_widgets = s3db.get_config(tablename, "filter_widgets")
+
+        #ajax_vars.pop("list_id")
+        #ajax_vars.pop("refresh")
+        filter_form = S3FilterForm(filter_widgets,
+                                   formstyle = filter_formstyle_profile,
+                                   submit = True,
+                                   ajax = True,
+                                   url = ajaxurl,
+                                   # Ensure that Filter options update when
+                                   # entries are added/modified
+                                   # => done through target-parameter in html() now,
+                                   #    but /a/ form ID is still required for other
+                                   #    scripts and styles
+                                   _id = "%s-filter-form" % dataTable_id,
+                                   ajaxurl = URL(c = "project",
+                                                 f = "task",
+                                                 args = ["filter.options"],
+                                                 vars = ajax_vars, # manually applied to s3.filter in customise()
+                                                 ),
+                                   )
+
+        output["project_task_filter_form"] = filter_form.html(resource, r.get_vars,
+                                                              target = dataTable_id,
+                                                              alias = None,
+                                                              )
+
+    # -------------------------------------------------------------------------
     def _updates_html(self, r, output, event_id, incident_id, updateable, **attr):
         """
             Create the HTML for the Updates section
@@ -758,6 +867,9 @@ class custom_WACOP(S3CRUD):
         elif incident_id:
             resource.add_filter(FS("event_post.incident_id") == incident_id)
             ajax_vars["event_post.incident_id"] = incident_id
+        elif r.method == "dashboard":
+            resource.add_filter(dashboard_filter())
+            ajax_vars["dashboard"] = 1
         ajaxurl = URL(c="cms", f="post", args="datalist",
                       vars=ajax_vars, extension="dl")
 
@@ -847,9 +959,18 @@ class custom_WACOP(S3CRUD):
                           args = [incident_id, "post", "create.popup"],
                           vars={"refresh": list_id},
                           )
+            elif r.method == "dashboard":
+                url = URL(c="cms", f="post",
+                          args = ["create.popup"],
+                          vars={"dashboard": 1,
+                                "refresh": list_id,
+                                },
+                          )
             else:
-                # Update doesn't make sense here
-                raise NotImplementedError
+                url = URL(c="cms", f="post",
+                          args = ["create.popup"],
+                          vars={"refresh": list_id},
+                          )
             output["create_post_button"] = DIV(A(ICON("add"),
                                                  T("Add Update"),
                                                  _href=url,
@@ -860,7 +981,7 @@ class custom_WACOP(S3CRUD):
         else:
             output["create_post_button"] = ""
 
-        appname = current.request.application
+        appname = r.application
 
         # Comments for Updates
         s3.scripts.append("/%s/static/themes/WACOP/js/update_comments.js" % appname)
@@ -942,14 +1063,7 @@ class event_Browse(custom_WACOP):
 
         # Map of Events
         map_id = "event-gis_location_the_geom-map-filter-map"
-        if current.deployment_settings.get_gis_spatialdb():
-            # Now done through S3MapFilter
-            _map = None
-            # Move Map into the Design
-            current.response.s3.jquery_ready.append('''$('#%s').appendTo($('#map-here'))''' % map_id)
-        else:
-            _map = self._map("Events", map_id=map_id)
-        current.response.s3.jquery_ready.append('''S3.wacop_resizeMap('%s')''' % map_id)
+        _map, button = self._map("Events", map_id=map_id, filter=True)
 
         # Output
         output = {"alerts": alerts,
@@ -982,6 +1096,7 @@ class event_Browse(custom_WACOP):
                                            ),
                           S3MapFilter("event_location.location_id$the_geom",
                                       label = "",
+                                      button = button,
                                       ),
                           S3OptionsFilter("tag.tag_id",
                                           label = "",
@@ -1044,6 +1159,28 @@ class event_Browse(custom_WACOP):
         return output
 
 # =============================================================================
+class group_Browse(custom_WACOP):
+    """
+        Custom browse page for Groups
+        - modelled as pr_forum
+    """
+
+    # -------------------------------------------------------------------------
+    def _html(self, r, **attr):
+        """
+            Handle HTML representation
+
+            @param r: the S3Request
+            @param attr: controller arguments
+        """
+
+        output = {}
+
+        self._view(output, "group_browse.html")
+
+        return output
+
+# =============================================================================
 class incident_Browse(custom_WACOP):
     """
         Custom browse page for Incidents
@@ -1068,14 +1205,7 @@ class incident_Browse(custom_WACOP):
 
         # Map of Incidents
         map_id = "incident-gis_location_the_geom-map-filter-map"
-        if current.deployment_settings.get_gis_spatialdb():
-            # Now done through S3MapFilter
-            _map = None
-            # Move Map into the Design
-            current.response.s3.jquery_ready.append('''$('#%s').appendTo($('#map-here'))''' % map_id)
-        else:
-            _map = self._map("Incidents", map_id=map_id)
-        current.response.s3.jquery_ready.append('''S3.wacop_resizeMap('%s')''' % map_id)
+        _map, button = self._map("Incidents", map_id=map_id, filter=True)
 
         # Output
         output = {"alerts": alerts,
@@ -1108,6 +1238,7 @@ class incident_Browse(custom_WACOP):
                                            ),
                           S3MapFilter("location_id$the_geom",
                                       label = "",
+                                      button = button,
                                       ),
                           S3OptionsFilter("tag.tag_id",
                                           label = "",
@@ -1190,6 +1321,7 @@ class incident_Browse(custom_WACOP):
 class resource_Browse(custom_WACOP):
     """
         Custom browse page for Resources
+        - modelled as pr_group as they are typically teams
     """
 
     # -------------------------------------------------------------------------
@@ -1211,14 +1343,7 @@ class resource_Browse(custom_WACOP):
 
         # Map of Resources
         map_id = "group-gis_location_the_geom-map-filter-map"
-        if current.deployment_settings.get_gis_spatialdb():
-            # Now done through S3MapFilter
-            _map = None
-            # Move Map into the Design
-            current.response.s3.jquery_ready.append('''$('#%s').appendTo($('#map-here'))''' % map_id)
-        else:
-            _map = self._map("Resources", map_id=map_id)
-        current.response.s3.jquery_ready.append('''S3.wacop_resizeMap('%s')''' % map_id)
+        _map, button = self._map("Resources", map_id=map_id, filter=True)
 
         # Output
         output = {"alerts": alerts,
@@ -1243,6 +1368,7 @@ class resource_Browse(custom_WACOP):
                                            ),
                           S3MapFilter("location_id$the_geom",
                                       label = "",
+                                      button = button,
                                       ),
                           S3OptionsFilter("organisation_team.organisation_id",
                                           label = "",
@@ -1337,16 +1463,12 @@ class event_Profile(custom_WACOP):
         auth = current.auth
         db = current.db
         s3db = current.s3db
+        settings = current.deployment_settings
 
         etable = s3db.event_event
         itable = s3db.event_incident
-        ptable = s3db.cms_post
-        gtable = s3db.gis_location
-        #rtable = s3db.pr_group
         ertable = s3db.event_team
         eptable = s3db.event_post
-        ttable = s3db.cms_tag
-        ittable = s3db.event_tag
 
         date_represent = lambda dt: S3DateTime.date_represent(dt,
                                                               format = "%b %d %Y %H:%M",
@@ -1355,7 +1477,7 @@ class event_Profile(custom_WACOP):
                                                               )
 
         # Map of Incidents
-        _map = self._map("Incidents", filter="~.event_id=%s" % event_id)
+        _map, button = self._map("Incidents", filter="~.event_id=%s" % event_id)
 
         # Output
         output = {"map": _map,
@@ -1465,13 +1587,13 @@ class event_Profile(custom_WACOP):
 
         # DataTables
         datatable = self._datatable
-        #current.deployment_settings.ui.datatables_pagingType = "bootstrap"
+        #settings.ui.datatables_pagingType = "bootstrap"
         dt_init = ['''$('.dataTables_filter label,.dataTables_length,.dataTables_info').hide();''']
 
         # Incidents dataTable
         tablename = "event_incident"
 
-        customise = current.deployment_settings.customise_resource(tablename)
+        customise = settings.customise_resource(tablename)
         if customise:
             customise(r, tablename)
 
@@ -1485,7 +1607,7 @@ class event_Profile(custom_WACOP):
         # Resources dataTable
         tablename = "event_team"
 
-        customise = current.deployment_settings.customise_resource(tablename)
+        customise = settings.customise_resource(tablename)
         if customise:
             customise(r, tablename)
 
@@ -1497,23 +1619,16 @@ class event_Profile(custom_WACOP):
                   )
 
         # Tasks dataTable
-        tablename = "project_task"
-
-        customise = current.deployment_settings.customise_resource(tablename)
-        if customise:
-            customise(r, tablename)
-
-        datatable(output = output,
-                  tablename = tablename,
-                  updateable = updateable,
-                  event_id = event_id,
-                  dt_init = dt_init,
-                  )
+        self._tasks_html(r, output,
+                         updateable = updateable,
+                         event_id = event_id,
+                         dt_init = dt_init,
+                         )
 
         # Staff dataTable
         tablename = "event_human_resource"
 
-        customise = current.deployment_settings.customise_resource(tablename)
+        customise = settings.customise_resource(tablename)
         if customise:
             customise(r, tablename)
 
@@ -1527,7 +1642,7 @@ class event_Profile(custom_WACOP):
         # Organisations dataTable
         tablename = "event_organisation"
 
-        customise = current.deployment_settings.customise_resource(tablename)
+        customise = settings.customise_resource(tablename)
         if customise:
             customise(r, tablename)
 
@@ -1542,6 +1657,28 @@ class event_Profile(custom_WACOP):
         self._updates_html(r, output, event_id, incident_id, updateable, **attr)
 
         self._view(output, "event_profile.html")
+
+        return output
+
+# =============================================================================
+class group_Profile(custom_WACOP):
+    """
+        Custom profile page for Groups
+        - modelled as pr_forum
+    """
+
+    # -------------------------------------------------------------------------
+    def _html(self, r, **attr):
+        """
+            Handle HTML representation
+
+            @param r: the S3Request
+            @param attr: controller arguments
+        """
+
+        output = {}
+
+        sself._view(output, "group_browse.html")
 
         return output
 
@@ -1566,6 +1703,7 @@ class incident_Profile(custom_WACOP):
         auth = current.auth
         db = current.db
         s3db = current.s3db
+        settings = current.deployment_settings
 
         ptable = s3db.cms_post
         gtable = s3db.gis_location
@@ -1781,13 +1919,13 @@ class incident_Profile(custom_WACOP):
 
         # DataTables
         datatable = self._datatable
-        #current.deployment_settings.ui.datatables_pagingType = "bootstrap"
+        #settings.ui.datatables_pagingType = "bootstrap"
         dt_init = ['''$('.dataTables_filter label,.dataTables_length,.dataTables_info').hide();''']
 
         # Resources dataTable
         tablename = "event_team"
 
-        customise = current.deployment_settings.customise_resource(tablename)
+        customise = settings.customise_resource(tablename)
         if customise:
             customise(r, tablename)
 
@@ -1799,23 +1937,16 @@ class incident_Profile(custom_WACOP):
                   )
 
         # Tasks dataTable
-        tablename = "project_task"
-
-        customise = current.deployment_settings.customise_resource(tablename)
-        if customise:
-            customise(r, tablename)
-
-        datatable(output = output,
-                  tablename = tablename,
-                  updateable = updateable,
-                  incident_id = incident_id,
-                  dt_init = dt_init,
-                  )
+        self._tasks_html(r, output,
+                         updateable = updateable,
+                         incident_id = incident_id,
+                         dt_init = dt_init,
+                         )
 
         # Staff dataTable
         tablename = "event_human_resource"
 
-        customise = current.deployment_settings.customise_resource(tablename)
+        customise = settings.customise_resource(tablename)
         if customise:
             customise(r, tablename)
 
@@ -1829,7 +1960,7 @@ class incident_Profile(custom_WACOP):
         # Organisations dataTable
         tablename = "event_organisation"
 
-        customise = current.deployment_settings.customise_resource(tablename)
+        customise = settings.customise_resource(tablename)
         if customise:
             customise(r, tablename)
 
@@ -1863,34 +1994,57 @@ class person_Dashboard(custom_WACOP):
             @param attr: controller arguments
         """
 
+        settings = current.deployment_settings
+
         # Map of Incidents
-        _map = self._map("Incidents")
+        _map, button = self._map("Incidents")
 
         output = {"map": _map,
                   }
 
+        # Greeting
+        user = current.auth.user
+        organisation_id = user.organisation_id
+        if organisation_id:
+            s3db = current.s3db
+            ptable = s3db.pr_person
+            ltable = s3db.pr_person_user
+            hrtable = s3db.hrm_human_resource
+            organisation = hrtable.organisation_id.represent(organisation_id)
+            query = (ltable.user_id == user.id) & \
+                    (ltable.pe_id == ptable.pe_id) & \
+                    (hrtable.person_id == ptable.id)
+            hr = current.db(query).select(hrtable.job_title_id,
+                                          limitby = (0, 1),
+                                          ).first()
+            if hr:
+                job_title = hrtable.organisation_id.represent(hr.job_title_id)
+                staff_role = XML("%s, %s" % (job_title, organisation))
+                
+            else:
+                staff_role = organisation
+        else:
+            staff_role = ""
+        output["greeting"] = Storage(first_name = user.first_name,
+                                     last_name = user.last_name,
+                                     staff_role = staff_role,
+                                     )
+
         # DataTables
         datatable = self._datatable
-        #current.deployment_settings.ui.datatables_pagingType = "bootstrap"
+        #settings.ui.datatables_pagingType = "bootstrap"
         dt_init = ['''$('.dataTables_filter label,.dataTables_length,.dataTables_info').hide();''']
 
         # Tasks dataTable
-        tablename = "project_task"
-
-        customise = current.deployment_settings.customise_resource(tablename)
-        if customise:
-            customise(r, tablename)
-
-        datatable(output = output,
-                  tablename = tablename,
-                  updateable = True,
-                  dt_init = dt_init,
-                  )
+        self._tasks_html(r, output,
+                         updateable = True,
+                         dt_init = dt_init,
+                         )
 
         # Staff dataTable
         tablename = "hrm_human_resource"
 
-        customise = current.deployment_settings.customise_resource(tablename)
+        customise = settings.customise_resource(tablename)
         if customise:
             customise(r, tablename)
 
@@ -1903,7 +2057,7 @@ class person_Dashboard(custom_WACOP):
         # Organisations dataTable
         tablename = "org_organisation"
 
-        customise = current.deployment_settings.customise_resource(tablename)
+        customise = settings.customise_resource(tablename)
         if customise:
             customise(r, tablename)
 
@@ -1913,13 +2067,50 @@ class person_Dashboard(custom_WACOP):
                   dt_init = dt_init,
                   )
 
-        # Updates DataList (without Create...at least until we can select an Incident to link it to)
+        # Updates DataList
         event_id = incident_id = None
-        self._updates_html(r, output, event_id, incident_id, False, **attr)
+        self._updates_html(r, output, event_id, incident_id, True, **attr)
 
         self._view(output, "dashboard.html")
 
         return output
+
+# =============================================================================
+def dashboard_filter():
+    """
+        Filter Updates on the Dashboard
+         - Updates we have Bookmarked
+         - Updates linked to Incidents we have Bookmarked
+         - Updates linked to Events we have Bookmarked
+           (unless that update is also linked to an Incident)
+         - @ToDo: Updates linked to Groups which we are a Member of
+    """
+
+    user_id = current.auth.user.id
+
+    btable = current.s3db.event_bookmark
+    query = (btable.user_id == user_id) & \
+            (btable.deleted == False)
+    bookmarks = current.db(query).select(btable.event_id,
+                                         btable.incident_id,
+                                         )
+    incident_ids = []
+    iappend = incident_ids.append
+    event_ids = []
+    eappend = event_ids.append
+    for b in bookmarks:
+        incident_id = b.incident_id
+        if incident_id is not None:
+            iappend(incident_id)
+        else:
+            eappend(b.event_id)
+
+    filter = (FS("bookmark.user_id") == user_id) | \
+             (FS("incident_post.incident_id").belongs(incident_ids)) | \
+             ((FS("incident_post.event_id").belongs(event_ids)) & \
+              (FS("incident_post.incident_id") == None))
+
+    return filter
 
 # =============================================================================
 def cms_post_list_layout(list_id, item_id, resource, rfields, record):

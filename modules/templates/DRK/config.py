@@ -70,7 +70,7 @@ def config(settings):
     # http://www.loc.gov/standards/iso639-2/php/code_list.php
     settings.L10n.languages = OrderedDict([
        ("en", "English"),
-       ("de", "Deutsch"),
+       ("de", "German"),
     ])
     # Default language for Language Toolbar (& GIS Locations in future)
     settings.L10n.default_language = "de"
@@ -112,6 +112,11 @@ def config(settings):
 
     # Version details on About-page require login
     settings.security.version_info_requires_login = True
+
+    # -------------------------------------------------------------------------
+    # General UI settings
+    #
+    settings.ui.calendar_clear_icon = True
 
     # -------------------------------------------------------------------------
     # CMS Module Settings
@@ -1004,11 +1009,9 @@ def config(settings):
     def customise_pr_person_controller(**attr):
 
         db = current.db
+        auth = current.auth
         s3db = current.s3db
         s3 = current.response.s3
-
-        has_role = current.auth.s3_has_role
-        is_admin = has_role(current.auth.get_system_roles().ADMIN)
 
         # Roles with extended access to person form
         PRIVILEGED = ("ADMIN_HEAD",
@@ -1020,16 +1023,17 @@ def config(settings):
                       "SECURITY_HEAD",
                       )
 
+        has_roles = auth.s3_has_roles
+
         s3.is_privileged = None
         def privileged():
             # Lazy check for privileged access to person form
             privileged = s3.is_privileged
             if privileged is None:
-                privileged = is_admin or any(has_role(role) for role in PRIVILEGED)
-                s3.is_privileged = privileged
+                s3.is_privileged = privileged = has_roles(PRIVILEGED)
             return privileged
 
-        QUARTIERMANAGER = has_role("QUARTIER") and not privileged()
+        QUARTIERMANAGER = auth.s3_has_role("QUARTIER") and not privileged()
 
         # Custom prep
         standard_prep = s3.prep
@@ -1432,7 +1436,18 @@ def config(settings):
                                             name = "bamf",
                                             ),
                                     "dvr_case.valid_until",
-                                    "dvr_case.stay_permit_until",
+                                    S3SQLInlineComponent(
+                                            "identity",
+                                            fields = ["value",
+                                                      "valid_until",
+                                                      ],
+                                            filterby = {"field": "type",
+                                                        "options": 5,
+                                                        },
+                                            label = T("Preliminary Residence Permit"),
+                                            multiple = False,
+                                            ),
+                                    #"dvr_case.stay_permit_until",
 
                                     # Shelter Data ----------------------------
                                     # Will always default & be hidden
@@ -1676,8 +1691,7 @@ def config(settings):
                     # Make appointments tab read-only even if the user is
                     # permitted to create or update appointments (via event
                     # registration), except for ADMINISTRATION/ADMIN_HEAD:
-                    if not has_role("ADMINISTRATION") and \
-                       not has_role("ADMIN_HEAD"):
+                    if not has_roles("ADMINISTRATION", "ADMIN_HEAD"):
                         r.component.configure(insertable = False,
                                               editable = False,
                                               deletable = False,
@@ -1875,27 +1889,10 @@ def config(settings):
 
         s3db = current.s3db
 
-        config = {}
-        get_config = s3db.get_config
-
-        for method in ("create", "update", None):
-
-            setting = "%s_onaccept" % method if method else "onaccept"
-            default = get_config(tablename, setting)
-            if not default:
-                if method is None and len(config) < 2:
-                    onaccept = dvr_case_onaccept
-                else:
-                    continue
-            elif not isinstance(default, list):
-                onaccept = [default, dvr_case_onaccept]
-            else:
-                onaccept = default
-                if all(cb != dvr_case_onaccept for cb in onaccept):
-                    onaccept.append(dvr_case_onaccept)
-            config[setting] = onaccept
-
-        s3db.configure(tablename, **config)
+        s3db.add_custom_callback(tablename,
+                                 "onaccept",
+                                 dvr_case_onaccept,
+                                 )
 
         ctable = s3db.dvr_case
 
@@ -1966,6 +1963,9 @@ def config(settings):
 
         if not auth.s3_has_role("ADMIN"):
 
+            db = current.db
+            s3db = current.s3db
+
             # Restrict access by note type
             GENERAL = "General"
             MEDICAL = "Medical"
@@ -1975,36 +1975,22 @@ def config(settings):
 
             user = auth.user
             if user:
+                has_roles = auth.s3_has_roles
+
                 # Roles permitted to access "Security" type notes
                 SECURITY_ROLES = ("ADMIN_HEAD",
                                   "SECURITY_HEAD",
                                   "POLICE",
                                   "MEDICAL",
                                   )
+                if has_roles(SECURITY_ROLES):
+                    permitted_note_types.append(SECURITY)
 
                 # Roles permitted to access "Health" type notes
                 MEDICAL_ROLES = ("ADMIN_HEAD",
                                  "MEDICAL",
                                  )
-
-                # Get role IDs
-                db = current.db
-                s3db = current.s3db
-                gtable = s3db.auth_group
-                roles = db(gtable.deleted != True).select(gtable.uuid,
-                                                          gtable.id,
-                                                          ).as_dict(key = "uuid")
-
-                realms = user.realms
-
-                security_roles = (roles[uuid]["id"]
-                                  for uuid in SECURITY_ROLES if uuid in roles)
-                if any(role in realms for role in security_roles):
-                    permitted_note_types.append(SECURITY)
-
-                medical_roles = (roles[uuid]["id"]
-                                 for uuid in MEDICAL_ROLES if uuid in roles)
-                if any(role in realms for role in medical_roles):
+                if has_roles(MEDICAL_ROLES):
                     permitted_note_types.append(MEDICAL)
 
             # Filter notes to permitted note types
@@ -2862,6 +2848,8 @@ def config(settings):
         from s3 import S3DateFilter, \
                        S3OptionsFilter, \
                        S3Represent, \
+                       S3SQLCustomForm, \
+                       S3SQLInlineComponent, \
                        S3TextFilter, \
                        s3_get_filter_opts
 
@@ -2905,7 +2893,35 @@ def config(settings):
         field = table.confiscated_by
         field.writable = False
 
+        # Default date for images
+        itable = s3db.doc_image
+        field = itable.date
+        field.default = current.request.utcnow.date()
+
         if r.interactive:
+
+            # CRUD form
+            crud_form = S3SQLCustomForm("person_id",
+                                        "item_type_id",
+                                        "number",
+                                        "date",
+                                        "confiscated_by",
+                                        "status",
+                                        "depository_id",
+                                        "status_comment",
+                                        "returned_on",
+                                        "returned_by",
+                                        S3SQLInlineComponent("image",
+                                             label = T("Photos"),
+                                             fields = ["date",
+                                                       "file",
+                                                       "comments",
+                                                       ],
+                                             explicit_add = T("Add Photo"),
+                                             ),
+                                        "comments",
+                                        )
+
             # Custom filter Widgets
             filter_widgets = [S3TextFilter(["person_id$pe_label",
                                             "person_id$first_name",
@@ -2942,6 +2958,7 @@ def config(settings):
                               ]
 
             s3db.configure("security_seized_item",
+                           crud_form = crud_form,
                            filter_widgets = filter_widgets,
                            )
 
@@ -3277,11 +3294,17 @@ def drk_dvr_rheader(r, tabs=[]):
                             (T("Appointments"), "case_appointment"),
                             (T("Allowance"), "allowance"),
                             (T("Presence"), "shelter_registration_history"),
-                            (T("Events"), "case_event"),
                             (T("Photos"), "image"),
                             (T("Notes"), "case_note"),
                             (T("Confiscation"), "seized_item"),
                             ]
+                    if current.auth.s3_has_roles(("ADMIN_HEAD",
+                                                  "ADMINISTRATION",
+                                                  "MEDICAL",
+                                                  "POLICE",
+                                                  "SECURITY_HEAD",
+                                                  )):
+                        tabs.insert(-3, (T("Events"), "case_event"))
 
                 case = resource.select(["dvr_case.status_id",
                                         "dvr_case.archived",
@@ -3807,6 +3830,15 @@ class DRKSiteActivityReport(object):
                                                              utc=True,
                                                              )
 
+        # Filtered component for preliminary residence permit
+        s3db.add_components("pr_person",
+                            pr_identity = {"name": "residence_permit",
+                                           "joinby": "person_id",
+                                           "filterby": {"type": 5},
+                                           "multiple": False,
+                                           },
+                            )
+
         # Filtered component for family
         s3db.add_components("pr_person",
                             pr_group = {"name": "family",
@@ -3883,7 +3915,7 @@ class DRKSiteActivityReport(object):
                        (T("X-Ray Place"), "xray_place"),
                        date_completed("BAMF"),
                        (T("BÜMA valid until"), "dvr_case.valid_until"),
-                       "dvr_case.stay_permit_until",
+                       (T("Preliminary Residence Permit until"), "residence_permit.valid_until"),
                        (T("Allowance Payments"), "payment.paid_on"),
                        (T("Admitted on"), "dvr_case.date"),
                        "dvr_case.origin_site_id",

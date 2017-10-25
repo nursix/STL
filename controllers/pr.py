@@ -176,17 +176,23 @@ def person():
         s3db.set_method(module, resourcename,
                         method = "contacts",
                         action = s3db.pr_Contacts)
-        contacts_tabs.append((T("Contacts"), "contacts"))
+        contacts_tabs.append((settings.get_pr_contacts_tab_label("all"),
+                              "contacts",
+                              ))
     if "public" in setting:
         s3db.set_method(module, resourcename,
                         method = "public_contacts",
                         action = s3db.pr_Contacts)
-        contacts_tabs.append((T("Public Contacts"), "public_contacts"))
+        contacts_tabs.append((settings.get_pr_contacts_tab_label("public_contacts"),
+                              "public_contacts",
+                              ))
     if "private" in setting and auth.is_logged_in():
         s3db.set_method(module, resourcename,
                         method = "private_contacts",
                         action = s3db.pr_Contacts)
-        contacts_tabs.append((T("Private Contacts"), "private_contacts"))
+        contacts_tabs.append((settings.get_pr_contacts_tab_label("private_contacts"),
+                              "private_contacts",
+                              ))
 
     # All tabs
     tabs = [(T("Basic Details"), None),
@@ -417,6 +423,13 @@ def check_duplicates():
     return s3_rest_controller(module, "person")
 
 # -----------------------------------------------------------------------------
+def forum():
+    """ RESTful CRUD controller """
+
+    output = s3_rest_controller(rheader = s3db.pr_rheader)
+    return output
+
+# -----------------------------------------------------------------------------
 def group():
     """ RESTful CRUD controller """
 
@@ -440,7 +453,7 @@ def group():
                                    (T("Members"), "group_membership")
                                    ])
 
-    output = s3_rest_controller(rheader=rheader)
+    output = s3_rest_controller(rheader = rheader)
 
     return output
 

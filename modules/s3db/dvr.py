@@ -35,6 +35,7 @@ __all__ = ("DVRCaseModel",
            "DVRHouseholdModel",
            "DVRHouseholdMembersModel",
            "DVRCaseEconomyInformationModel",
+           "DVRLegalStatusModel",
            "DVRCaseEffortModel",
            "DVRCaseEventModel",
            "DVRCaseEvaluationModel",
@@ -46,6 +47,7 @@ __all__ = ("DVRCaseModel",
            "DVRSiteActivityModel",
            "DVRVulnerabilityModel",
            "dvr_ActivityRepresent",
+           "dvr_CaseActivityRepresent",
            "dvr_AssignMethod",
            "dvr_case_default_status",
            "dvr_case_activity_default_status",
@@ -578,13 +580,7 @@ class DVRCaseModel(S3Model):
                      person_id(empty = False,
                                ondelete = "CASCADE",
                                ),
-                     Field("language",
-                           label = T("Language"),
-                           represent = IS_ISO639_2_LANGUAGE_CODE.represent_local,
-                           requires = IS_ISO639_2_LANGUAGE_CODE(select = None,
-                                                                translate = True,
-                                                                ),
-                           ),
+                     s3_language(list_from_settings = False),
                      Field("quality",
                            default = "N",
                            label = T("Quality/Mode"),
@@ -620,6 +616,12 @@ class DVRCaseModel(S3Model):
                            ),
                      s3_date("arrival_date",
                              label = T("Arrival Date"),
+                             ),
+                     s3_date("on_site_from",
+                             label = T("On-site from"),
+                             ),
+                     s3_date("on_site_until",
+                             label = T("On-site until"),
                              ),
                      self.dvr_referral_type_id(),
                      self.dvr_referral_type_id(
@@ -1466,7 +1468,7 @@ class DVRResponseModel(S3Model):
                                            )
 
         # ---------------------------------------------------------------------
-        # Response status
+        # Response action status
         #
         tablename = "dvr_response_status"
         define_table(tablename,
@@ -1479,11 +1481,15 @@ class DVRResponseModel(S3Model):
                            ),
                      Field("is_default", "boolean",
                            default = False,
-                           label = T("Default Status"),
+                           label = T("Default Initial Status"),
                            ),
                      Field("is_closed", "boolean",
                            default = False,
-                           label = T("Closes Response"),
+                           label = T("Closes Response Action"),
+                           ),
+                     Field("is_default_closure", "boolean",
+                           default = False,
+                           label = T("Default Closure Status"),
                            ),
                      s3_comments(),
                      *s3_meta_fields())
@@ -1526,26 +1532,109 @@ class DVRResponseModel(S3Model):
         # ---------------------------------------------------------------------
         # Responses
         #
+        case_label = settings.get_dvr_label()
+        if case_label: # If we add more options in future then == "Beneficiary"
+            CASE = T("Beneficiary")
+        else:
+            CASE = T("Case")
+
         tablename = "dvr_response_action"
         define_table(tablename,
                      self.dvr_case_activity_id(
                          empty = False,
+                         label = CASE,
                          ondelete = "CASCADE",
+                         writable = False,
                          ),
                      response_type_id(
                          empty = False,
+                         label = T("Action Type"),
                          ondelete = "RESTRICT",
                          ),
                      s3_date("date_due",
                              label = T("Date Due"),
                              ),
-                     s3_date(), # Date actioned
+                     s3_date(label = T("Date Actioned"),
+                             ),
                      self.hrm_human_resource_id(),
                      response_status_id(),
-                     s3_comments(),
+                     s3_comments(label = T("Details"),
+                                 comment = None,
+                                 ),
                      *s3_meta_fields())
 
-        # @todo: CRUD strings
+        # List_fields
+        list_fields = ["case_activity_id",
+                       "response_type_id",
+                       "comments",
+                       "human_resource_id",
+                       "date_due",
+                       "date",
+                       "status_id",
+                       ]
+
+        # Filter widgets
+        if hierarchical_response_types:
+            response_type_filter = S3HierarchyFilter("response_type_id",
+                                                     lookup = "dvr_response_type",
+                                                     hidden = True,
+                                                     )
+        else:
+            response_type_filter = S3OptionsFilter("response_type_id",
+                                                   options = lambda: \
+                                                       s3_get_filter_opts("dvr_response_type"),
+                                                   hidden = True,
+                                                   )
+
+        filter_widgets = [S3TextFilter(["case_activity_id$person_id$pe_label",
+                                        "case_activity_id$person_id$first_name",
+                                        "case_activity_id$person_id$middle_name",
+                                        "case_activity_id$person_id$last_name",
+                                        "comments",
+                                        ],
+                                        label = T("Search"),
+                                       ),
+                          S3OptionsFilter("status_id",
+                                          options = lambda: \
+                                              s3_get_filter_opts("dvr_response_status"),
+                                          cols = 3,
+                                          translate = True,
+                                          ),
+                          S3DateFilter("date_due"),
+                          response_type_filter,
+                          ]
+
+        # CRUD Form
+        crud_form = S3SQLCustomForm("case_activity_id",
+                                    "response_type_id",
+                                    "comments",
+                                    "human_resource_id",
+                                    "date_due",
+                                    "date",
+                                    "status_id",
+                                    )
+
+        # Table Configuration
+        configure(tablename,
+                  crud_form = crud_form,
+                  filter_widgets = filter_widgets,
+                  list_fields = list_fields,
+                  )
+
+        # CRUD Strings
+        crud_strings[tablename] = Storage(
+            label_create = T("Create Action"),
+            title_display = T("Action Details"),
+            title_list = T("Actions"),
+            title_update = T("Edit Action"),
+            label_list_button = T("List Actions"),
+            label_delete_button = T("Delete Action"),
+            msg_record_created = T("Action created"),
+            msg_record_modified = T("Action updated"),
+            msg_record_deleted = T("Action deleted"),
+            msg_list_empty = T("No Actions currently registered"),
+        )
+
 
         # ---------------------------------------------------------------------
         # Response Types <=> Case Activities link table
@@ -1586,12 +1675,19 @@ class DVRResponseModel(S3Model):
         if not record_id:
             return
 
+        table = current.s3db.dvr_response_status
+        db = current.db
+
         # If this status is the default, then set is_default-flag
         # for all other statuses to False:
-        if "is_default" in form_vars and form_vars.is_default:
-            table = current.s3db.dvr_response_status
-            db = current.db
+        if form_vars.get("is_default"):
             db(table.id != record_id).update(is_default = False)
+
+        # If this status is the default closure, then enforce is_closed,
+        # and set is_default_closure for all other statuses to False
+        if form_vars.get("is_default_closure"):
+            db(table.id == record_id).update(is_closed = True)
+            db(table.id != record_id).update(is_default_closure = False)
 
     # -------------------------------------------------------------------------
     @staticmethod
@@ -1641,6 +1737,8 @@ class DVRCaseActivityModel(S3Model):
 
         service_id = self.org_service_id
         project_id = self.project_project_id
+        organisation_id = self.org_organisation_id
+        human_resource_id = self.hrm_human_resource_id
 
         # ---------------------------------------------------------------------
         # Provider Type
@@ -1867,9 +1965,9 @@ class DVRCaseActivityModel(S3Model):
                                 writable = service_type,
                                 ),
                      # Expose in template as needed:
-                     self.org_organisation_id(readable = False,
-                                              writable = False,
-                                              ),
+                     organisation_id(readable = False,
+                                     writable = False,
+                                     ),
                      project_id(ondelete = "SET NULL",
                                 readable = False,
                                 writable = False,
@@ -2134,13 +2232,33 @@ class DVRCaseActivityModel(S3Model):
                                       ondelete = "CASCADE",
                                       writable = False,
                                       ),
-                     # Beneficiary (component link):
+
+                     # Beneficiary (component link)
                      # @todo: populate from case and hide in case perspective
                      self.pr_person_id(comment = None,
                                        empty = False,
                                        ondelete = "CASCADE",
                                        writable = False,
                                        ),
+
+                     # Subject and Details
+                     Field("subject",
+                           label = T("Subject / Occasion"),
+                           readable = False,
+                           writable = False,
+                           ),
+                     Field("need_details", "text",
+                           label = T("Need Details"),
+                           represent = s3_text_represent,
+                           widget = s3_comments_widget,
+                           ),
+
+                     # Need type (if single)
+                     self.dvr_need_id(readable = not multiple_needs,
+                                      writable = not multiple_needs,
+                                      ),
+
+                     # Dates
                      s3_date("start_date",
                              label = T("Registered on"),
                              default = "now",
@@ -2152,11 +2270,111 @@ class DVRCaseActivityModel(S3Model):
                              writable = False,
                              set_max = "#dvr_case_activity_start_date",
                              ),
-                     self.dvr_need_id(readable = not multiple_needs,
-                                      writable = not multiple_needs,
+
+                     # Priority
+                     Field("emergency", "boolean",
+                           default = False,
+                           label = T("Emergency"),
+                           represent = s3_yes_no_represent,
+                           ),
+                     Field("priority", "integer",
+                           label = T("Priority"),
+                           represent = S3Represent(options=dict(priority_opts)),
+                           requires = IS_IN_SET(priority_opts, sort=False),
+                           default = 2, # normal
+                           readable = False,
+                           writable = False,
+                           ),
+
+                     # Responsibilities (activate in template as needed)
+                     organisation_id(label = T("Referral Agency"),
+                                     readable = False,
+                                     writable = False,
+                                     ),
+                     human_resource_id(label = T("Assigned to"),
+                                       readable = False,
+                                       writable = False,
+                                       ),
+
+                     # Categories (activate in template as needed)
+                     self.org_sector_id(readable = activity_sectors,
+                                        writable = activity_sectors,
+                                        ),
+                     service_id(label = T("Service Type"),
+                                ondelete = "RESTRICT",
+                                readable = service_type,
+                                writable = service_type,
+                                ),
+                     project_id(ondelete = "SET NULL",
+                                readable = False,
+                                writable = False,
+                                ),
+
+                     # Actions performed (activate in template as needed)
+                     activity_id(readable=False,
+                                 writable=False,
+                                 ),
+                     Field("activity_details", "text",
+                           label = T("Support provided"),
+                           represent = s3_text_represent,
+                           widget = s3_comments_widget,
+                           ),
+                     provider_type_id(label = T("Referred to"),
+                                      ondelete = "RESTRICT",
+                                      readable = False,
+                                      writable = False,
                                       ),
-                     Field("need_details", "text",
-                           label = T("Need Details"),
+
+                     # Support received by the beneficiary independently
+                     # of the managed activity:
+                     Field("outside_support", "text",
+                           label = T("Outside Support"),
+                           represent = s3_text_represent,
+                           widget = s3_comments_widget,
+                           readable = False,
+                           writable = False,
+                           ),
+
+                     # Details about referrals made under this activity
+                     # @deprecate: should use activity_details instead
+                     # @todo: remove once templates have been migrated?
+                     Field("referral_details", "text",
+                           label = T("Support provided"),
+                           represent = s3_text_represent,
+                           readable = False,
+                           writable = False,
+                           ),
+
+                     # Follow-up
+                     Field("followup", "boolean",
+                           default = True,
+                           label = T("Follow up"),
+                           represent = s3_yes_no_represent,
+                           ),
+                     s3_date("followup_date",
+                             default = twoweeks,
+                             label = T("Date for Follow-up"),
+                             ),
+
+                     # Status, type of exit
+                     Field("completed", "boolean",
+                           default = False,
+                           label = T("Completed"),
+                           represent = s3_yes_no_represent,
+                           readable = not use_status,
+                           writable = not use_status,
+                           ),
+                     activity_status_id(readable = use_status,
+                                        writable = use_status,
+                                        ),
+                     termination_type_id(ondelete = "RESTRICT",
+                                         readable = False,
+                                         writable = False,
+                                         ),
+
+                     # Outcomes
+                     Field("outcome", "text",
+                           label = T("Outcome"),
                            represent = s3_text_represent,
                            widget = s3_comments_widget,
                            ),
@@ -2177,101 +2395,6 @@ class DVRCaseActivityModel(S3Model):
                            readable = False,
                            writable = False,
                            ),
-                     Field("emergency", "boolean",
-                           default = False,
-                           label = T("Emergency"),
-                           represent = s3_yes_no_represent,
-                           ),
-                     Field("priority", "integer",
-                           label = T("Priority"),
-                           represent = S3Represent(options=dict(priority_opts)),
-                           requires = IS_IN_SET(priority_opts, sort=False),
-                           default = 2, # normal
-                           readable = False,
-                           writable = False,
-                           ),
-                     # Activate in template as needed:
-                     self.org_organisation_id(label = T("Referral Agency"),
-                                              readable = False,
-                                              writable = False,
-                                              ),
-                     self.hrm_human_resource_id(label = T("Assigned to"),
-                                                readable = False,
-                                                writable = False,
-                                                ),
-                     project_id(ondelete = "SET NULL",
-                                readable = False,
-                                writable = False,
-                                ),
-                     service_id(label = T("Service Type"),
-                                ondelete = "RESTRICT",
-                                readable = service_type,
-                                writable = service_type,
-                                ),
-                     self.org_sector_id(readable = activity_sectors,
-                                        writable = activity_sectors,
-                                        ),
-                     # Alternatives to document the actions performed
-                     # under this activity:
-                     activity_id(readable=False,
-                                 writable=False,
-                                 ),
-                     provider_type_id(label = T("Referred to"),
-                                      ondelete = "RESTRICT",
-                                      readable = False,
-                                      writable = False,
-                                      ),
-                     Field("activity_details", "text",
-                           label = T("Support provided"),
-                           represent = s3_text_represent,
-                           widget = s3_comments_widget,
-                           ),
-                     # Support received by the beneficiary independently
-                     # of the managed activity:
-                     Field("outside_support", "text",
-                           label = T("Outside Support"),
-                           represent = s3_text_represent,
-                           widget = s3_comments_widget,
-                           readable = False,
-                           writable = False,
-                           ),
-                     # Details about referrals made under this activity
-                     # @deprecate: should use activity_details instead
-                     # @todo: remove once templates have been migrated?
-                     Field("referral_details", "text",
-                           label = T("Support provided"),
-                           represent = s3_text_represent,
-                           readable = False,
-                           writable = False,
-                           ),
-                     Field("followup", "boolean",
-                           default = True,
-                           label = T("Follow up"),
-                           represent = s3_yes_no_represent,
-                           ),
-                     s3_date("followup_date",
-                             default = twoweeks,
-                             label = T("Date for Follow-up"),
-                             ),
-                     Field("outcome", "text",
-                           label = T("Outcome"),
-                           represent = s3_text_represent,
-                           widget = s3_comments_widget,
-                           ),
-                     Field("completed", "boolean",
-                           default = False,
-                           label = T("Completed"),
-                           represent = s3_yes_no_represent,
-                           readable = not use_status,
-                           writable = not use_status,
-                           ),
-                     activity_status_id(readable = use_status,
-                                        writable = use_status,
-                                        ),
-                     termination_type_id(ondelete = "RESTRICT",
-                                         readable = False,
-                                         writable = False,
-                                         ),
                      s3_comments(),
                      *s3_meta_fields())
 
@@ -2419,11 +2542,14 @@ class DVRCaseActivityModel(S3Model):
             )
 
         # Reusable field
+        represent = dvr_CaseActivityRepresent(show_link=True),
         case_activity_id = S3ReusableField("case_activity_id",
                                            "reference %s" % tablename,
                                            ondelete = "CASCADE",
+                                           represent = represent,
                                            requires = IS_EMPTY_OR(
                                                 IS_ONE_OF(db, "%s.id" % tablename,
+                                                          represent,
                                                           )),
                                            )
 
@@ -2443,13 +2569,18 @@ class DVRCaseActivityModel(S3Model):
                      s3_date(label = T("Established on"),
                              default = "now",
                              ),
-                     self.hrm_human_resource_id(
-                         label=T("Established by"),
+                     human_resource_id(
+                         label = T("Established by"),
                          ),
                      self.dvr_need_id(empty = False,
                                       ),
                      s3_comments(),
                      *s3_meta_fields())
+
+        # Table configuration
+        configure(tablename,
+                  orderby = "%s.date" % tablename,
+                  )
 
         # ---------------------------------------------------------------------
         # Case Service Contacts (other than case activities)
@@ -2467,8 +2598,8 @@ class DVRCaseActivityModel(S3Model):
                                       ),
                      s3_date(),
                      self.dvr_need_id(),
-                     self.org_organisation_id(label=T("Providing Agency"),
-                                              ),
+                     organisation_id(label=T("Providing Agency"),
+                                     ),
                      s3_comments(),
                      *s3_meta_fields())
 
@@ -2498,7 +2629,7 @@ class DVRCaseActivityModel(S3Model):
                      s3_comments(),
                      *s3_meta_fields())
 
-        # Table Configuration
+        # Table configuration
         configure(tablename,
                   deduplicate = S3Duplicate(),
                   )
@@ -2536,11 +2667,17 @@ class DVRCaseActivityModel(S3Model):
         tablename = "dvr_case_activity_update"
         define_table(tablename,
                      case_activity_id(),
-                     s3_date(),
+                     s3_date(default = "now",
+                             ),
                      update_type_id(),
-                     self.hrm_human_resource_id(),
+                     human_resource_id(),
                      s3_comments(),
                      *s3_meta_fields())
+
+        # Table configuration
+        configure(tablename,
+                  orderby = "%s.date" % tablename,
+                  )
 
         # ---------------------------------------------------------------------
         # Pass names back to global scope (s3.*)
@@ -2612,14 +2749,58 @@ class DVRCaseActivityModel(S3Model):
 
     # -------------------------------------------------------------------------
     @staticmethod
-    def case_activity_onaccept(form):
+    def case_activity_close_responses(case_activity_id):
         """
-            Onaccept-callback for case activites:
-                - automatically set end date when marked as completed
+            Close all open response actions in a case activity
+
+            @param case_activity_id: the case activity record ID
         """
 
         db = current.db
         s3db = current.s3db
+
+        rtable = s3db.dvr_response_action
+        stable = s3db.dvr_response_status
+
+        # Get all response actions for this case activity
+        # that have an open-status (or no status at all):
+        left = stable.on((stable.id == rtable.status_id) & \
+                         (stable.deleted == False))
+        query = (rtable.case_activity_id == case_activity_id) & \
+                (rtable.deleted == False) & \
+                ((stable.is_closed == False) | (stable.id == None))
+        rows = db(query).select(rtable.id)
+
+        if rows:
+
+            # Get the default closure status,
+            # (usually something like "obsolete")
+            query = (stable.is_default_closure == True) & \
+                    (stable.deleted == False)
+            closure_status = db(query).select(stable.id,
+                                              limitby = (0, 1),
+                                              ).first()
+
+            # Update all open response actions for this
+            # case activity to the default closure status:
+            if closure_status:
+                response_ids = set(row.id for row in rows)
+                query = rtable.id.belongs(response_ids)
+                db(query).update(status_id = closure_status.id)
+
+    # -------------------------------------------------------------------------
+    @classmethod
+    def case_activity_onaccept(cls, form):
+        """
+            Onaccept-callback for case activites:
+                - set end date when marked as completed
+                - close any open response actions when marked as completed
+        """
+
+        db = current.db
+        s3db = current.s3db
+
+        settings = current.deployment_settings
 
         # Read form data
         form_vars = form.vars
@@ -2630,23 +2811,62 @@ class DVRCaseActivityModel(S3Model):
         else:
             return
 
-        # Get the record
+        # Get current status and end_date of the record
         atable = s3db.dvr_case_activity
         query = (atable.id == record_id)
-        row = db(query).select(atable.id,
-                               atable.end_date,
-                               atable.completed,
-                               limitby = (0, 1),
-                               ).first()
-        if not row:
+
+        activity = None
+        is_closed = False
+
+        if settings.get_dvr_case_activity_use_status():
+            # Use status_id
+            stable = s3db.dvr_case_activity_status
+            left = stable.on(atable.status_id == stable.id)
+            row = db(query).select(atable.id,
+                                   atable.end_date,
+                                   stable.is_closed,
+                                   left = left,
+                                   limitby = (0, 1),
+                                   ).first()
+            if row:
+                activity = row.dvr_case_activity
+                is_closed = row.dvr_case_activity_status.is_closed
+
+        else:
+            # Use completed-flag
+            row = db(query).select(atable.id,
+                                   atable.end_date,
+                                   atable.completed,
+                                   limitby = (0, 1),
+                                   ).first()
+            if row:
+                activity = row
+                is_closed = row.completed
+
+        if not activity:
             return
 
-        # Update closed_on date
-        if row.completed:
-            if not row.end_date:
-                row.update_record(end_date = current.request.utcnow.date())
-        elif row.end_date:
-            row.update_record(end_date = None)
+        if is_closed:
+
+            # Cancel follow-ups for closed activities
+            data = {"followup": False,
+                    "followup_date": None,
+                    }
+
+            # Set end-date if not already set
+            if not activity.end_date:
+                data["end_date"] = current.request.utcnow.date()
+
+            activity.update_record(**data)
+
+            # Close any open response actions in this activity:
+            if settings.get_dvr_manage_response_actions:
+                cls.case_activity_close_responses(activity.id)
+
+        elif activity.end_date:
+
+            # Remove end-date if present
+            activity.update_record(end_date = None)
 
 # =============================================================================
 class DVRCaseEffortModel(S3Model):
@@ -2798,6 +3018,7 @@ class DVRCaseAppointmentModel(S3Model):
 
         mandatory_appointments = settings.get_dvr_mandatory_appointments()
         update_case_status = settings.get_dvr_appointments_update_case_status()
+        update_last_seen_on = settings.get_dvr_appointments_update_last_seen_on()
 
         # ---------------------------------------------------------------------
         # Case Appointment Type
@@ -2856,6 +3077,8 @@ class DVRCaseAppointmentModel(S3Model):
                            default = True,
                            label = T("Presence required"),
                            represent = s3_yes_no_represent,
+                           readable = update_last_seen_on,
+                           writable = update_last_seen_on,
                            comment = DIV(_class = "tooltip",
                                          _title = "%s|%s" % (T("Presence required"),
                                                              T("This appointment requires the presence of the person concerned"),
@@ -3649,6 +3872,175 @@ class DVRCaseEconomyInformationModel(S3Model):
     @staticmethod
     def defaults():
         """ Safe defaults for names in case the module is disabled """
+
+        return {}
+
+# =============================================================================
+class DVRLegalStatusModel(S3Model):
+    """ Models to document the legal status of a beneficiary """
+
+    names = ("dvr_residence_status_type",
+             "dvr_residence_permit_type",
+             "dvr_residence_status",
+             )
+
+    def model(self):
+
+        T = current.T
+
+        db = current.db
+        s3 = current.response.s3
+
+        define_table = self.define_table
+        crud_strings = s3.crud_strings
+
+        # ---------------------------------------------------------------------
+        # Residence Status Types
+        #
+        tablename = "dvr_residence_status_type"
+        define_table(tablename,
+                     Field("name",
+                           requires = IS_NOT_EMPTY(),
+                           ),
+                     s3_comments(),
+                     *s3_meta_fields())
+
+        # Table Configuration
+        self.configure(tablename,
+                       deduplicate = S3Duplicate(),
+                       )
+
+        # CRUD Strings
+        crud_strings[tablename] = Storage(
+            label_create = T("Create Residence Status Type"),
+            title_display = T("Residence Status Type Details"),
+            title_list = T("Residence Status Types"),
+            title_update = T("Edit Residence Status Type"),
+            label_list_button = T("List Residence Status Types"),
+            label_delete_button = T("Delete Residence Status Type"),
+            msg_record_created = T("Residence Status Type created"),
+            msg_record_modified = T("Residence Status Type updated"),
+            msg_record_deleted = T("Residence Status Type deleted"),
+            msg_list_empty = T("No Residence Status Types currently defined"),
+            )
+
+        # Reusable field
+        represent = S3Represent(lookup=tablename, translate=True)
+        status_type_id = S3ReusableField("status_type_id",
+                                         "reference %s" % tablename,
+                                         label = T("Residence Status"),
+                                         represent = represent,
+                                         requires = IS_EMPTY_OR(IS_ONE_OF(
+                                            db, "%s.id" % tablename,
+                                            represent,
+                                            )),
+                                         sortby = "name",
+                                         comment = S3PopupLink(
+                                                c="dvr",
+                                                f="residence_status_type",
+                                                tooltip=T("Create a new status type"),
+                                                ),
+                                         )
+
+        # ---------------------------------------------------------------------
+        # Residence Permit Types
+        #
+        tablename = "dvr_residence_permit_type"
+        define_table(tablename,
+                     Field("name",
+                           requires = IS_NOT_EMPTY(),
+                           ),
+                     s3_comments(),
+                     *s3_meta_fields())
+
+        # Table Configuration
+        self.configure(tablename,
+                       deduplicate = S3Duplicate(),
+                       )
+
+        # CRUD Strings
+        crud_strings[tablename] = Storage(
+            label_create = T("Create Residence Permit Type"),
+            title_display = T("Residence Permit Type Details"),
+            title_list = T("Residence Permit Types"),
+            title_update = T("Edit Residence Permit Type"),
+            label_list_button = T("List Residence Permit Types"),
+            label_delete_button = T("Delete Residence Permit Type"),
+            msg_record_created = T("Residence Permit Type created"),
+            msg_record_modified = T("Residence Permit Type updated"),
+            msg_record_deleted = T("Residence Permit Type deleted"),
+            msg_list_empty = T("No Residence Permit Types currently defined"),
+            )
+
+        # Reusable field
+        represent = S3Represent(lookup=tablename, translate=True)
+        permit_type_id = S3ReusableField("permit_type_id",
+                                         "reference %s" % tablename,
+                                         label = T("Residence Permit Type"),
+                                         represent = represent,
+                                         requires = IS_EMPTY_OR(IS_ONE_OF(
+                                                        db, "%s.id" % tablename,
+                                                        represent,
+                                                        )),
+                                         sortby = "name",
+                                         comment = S3PopupLink(
+                                                        c="dvr",
+                                                        f="residence_permit_type",
+                                                        tooltip=T("Create a new permit type"),
+                                                        ),
+                                                   )
+
+        # ---------------------------------------------------------------------
+        # Residence Status
+        #
+        tablename = "dvr_residence_status"
+        define_table(tablename,
+                     self.pr_person_id(),
+                     status_type_id(),
+                     permit_type_id(),
+                     Field("reference",
+                           label = T("ID/Ref.No."),
+                           ),
+                     s3_date("valid_from",
+                             label = T("Valid From"),
+                             ),
+                     s3_date("valid_until",
+                             label = T("Valid Until"),
+                             ),
+                     #Field("obsolete", "boolean",
+                     #      default = False,
+                     #      ),
+                     s3_comments(),
+                     *s3_meta_fields())
+
+        # CRUD Strings
+        crud_strings[tablename] = Storage(
+            label_create = T("Create Residence Status"),
+            title_display = T("Residence Status Details"),
+            title_list = T("Residence Statuses"),
+            title_update = T("Edit Residence Status"),
+            label_list_button = T("List Residence Statuses"),
+            label_delete_button = T("Delete Residence Status"),
+            msg_record_created = T("Residence Status created"),
+            msg_record_modified = T("Residence Status updated"),
+            msg_record_deleted = T("Residence Status deleted"),
+            msg_list_empty = T("No Residence Statuses currently defined"),
+            )
+
+        # ---------------------------------------------------------------------
+        # Pass names back to global scope (s3.*)
+        #
+        return {}
+
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def defaults():
+        """ Safe defaults for names in case the module is disabled """
+
+        #dummy = S3ReusableField("dummy_id", "integer",
+        #                        readable = False,
+        #                        writable = False,
+        #                        )
 
         return {}
 
@@ -5015,8 +5407,12 @@ def dvr_case_household_size(group_id):
             db(ctable.id == case_id).update(household_size = number_of_members)
 
 # =============================================================================
-def dvr_due_followups():
-    """ Number of due follow-ups """
+def dvr_due_followups(human_resource_id=None):
+    """
+        Number of activities due for follow-up
+
+        @param human_resource_id: count only activities assigned to this HR
+    """
 
     # Generate a request for case activities and customise it
     r = S3Request("dvr", "case_activity",
@@ -5026,11 +5422,21 @@ def dvr_due_followups():
     r.customise_resource()
     resource = r.resource
 
+    # Filter to exclude closed case activities
+    if current.deployment_settings.get_dvr_case_activity_use_status():
+        status_filter = (FS("status_id$is_closed") == False)
+    else:
+        status_filter = (FS("completed") == False)
+
     # Filter for due follow-ups
     query = (FS("followup") == True) & \
             (FS("followup_date") <= datetime.datetime.utcnow().date()) & \
-            (FS("completed") != True) & \
+            status_filter & \
             (FS("person_id$dvr_case.archived") == False)
+
+    if human_resource_id:
+        query &= (FS("human_resource_id") == human_resource_id)
+
     resource.add_filter(query)
 
     return resource.count()
@@ -5136,7 +5542,97 @@ class dvr_ActivityRepresent(S3Represent):
             @param row: the row with this key (unused here)
         """
 
-        url = URL(c="dvr", f="activity", args=[k])
+        url = URL(c="dvr", f="activity", args=[k], extension="")
+
+        return A(v, _href = url)
+
+# =============================================================================
+class dvr_CaseActivityRepresent(S3Represent):
+    """ Representation of case activity IDs """
+
+    def __init__(self, show_link=False, fmt=None):
+        """
+            Constructor
+
+            @param show_link: show representation as clickable link
+            @param fmt: string format template for person record
+        """
+
+        super(dvr_CaseActivityRepresent, self).__init__(
+                                                lookup = "dvr_case_activity",
+                                                show_link = show_link,
+                                                )
+
+        if fmt:
+            self.fmt = fmt
+        else:
+            self.fmt = "%(first_name)s %(last_name)s"
+
+    # -------------------------------------------------------------------------
+    def lookup_rows(self, key, values, fields=[]):
+        """
+            Custom rows lookup
+
+            @param key: the key Field
+            @param values: the values
+            @param fields: unused (retained for API compatibility)
+        """
+
+        table = self.table
+
+        count = len(values)
+        if count == 1:
+            query = (key == values[0])
+        else:
+            query = key.belongs(values)
+
+        ptable = current.s3db.pr_person
+        left = ptable.on(ptable.id == table.person_id)
+
+        rows = current.db(query).select(table.id,
+                                        ptable.id,
+                                        ptable.pe_label,
+                                        ptable.first_name,
+                                        ptable.middle_name,
+                                        ptable.last_name,
+                                        left = left,
+                                        limitby = (0, count),
+                                        )
+        self.queries += 1
+
+        return rows
+
+    # -------------------------------------------------------------------------
+    def represent_row(self, row):
+        """
+            Represent a row
+
+            @param row: the Row
+        """
+
+        beneficiary = row.pr_person
+
+        repr_str = self.fmt % beneficiary
+
+        return repr_str
+
+    # -------------------------------------------------------------------------
+    def link(self, k, v, row=None):
+        """
+            Represent a (key, value) as hypertext link
+
+            @param k: the key (dvr_case_activity.id)
+            @param v: the representation of the key
+            @param row: the row with this key
+        """
+
+        beneficiary = row.pr_person
+
+        url = URL(c = "dvr",
+                  f = "person",
+                  args = [beneficiary.id, "case_activity", k],
+                  extension = "",
+                  )
 
         return A(v, _href = url)
 

@@ -63,8 +63,6 @@ from s3utils import s3_get_foreign_key, s3_str, s3_unicode, S3TypeConverter
 from s3validators import *
 from s3widgets import ICON, \
                       S3CalendarWidget, \
-                      S3DateWidget, \
-                      S3DateTimeWidget, \
                       S3GroupedOptionsWidget, \
                       S3MultiSelectWidget, \
                       S3HierarchyWidget
@@ -906,7 +904,8 @@ class S3DateFilter(S3RangeFilter):
                 #range_picker["_data-fmt"] = current.deployment_settings.get_L10n_datetime_format()
                 range_picker["_data-fmt"] = "MMM D YYYY HH:mm"
                 #range_picker["_data-fmt"] = "LLL" # Locale-aware version
-            append(range_picker)
+            append(DIV(range_picker,
+                       _class="range-picker-wrapper"))
 
         get_variable = self._variable
 
@@ -1307,6 +1306,7 @@ class S3LocationFilter(S3FilterWidget):
                                           requires=IS_IN_SET(options,
                                                              multiple=True))
                     widget = w(dummy_field, _values, **attr)
+                    first = False
                 else:
                     # Hidden, empty dropdown added to the page, whose options and multiselect will be activated when the higher level is selected
                     if hide:
@@ -1330,7 +1330,6 @@ class S3LocationFilter(S3FilterWidget):
                     script = '''S3.%s=function(){%s}''' % (name.replace("-", "_"), script)
                     s3.js_global.append(script)
                 w_append(widget)
-                first = False
 
         # Restore id and name for the data_element
         attr["_id"] = base_id
@@ -1481,6 +1480,8 @@ class S3LocationFilter(S3FilterWidget):
         else:
             selector = self.field
 
+        filters_added = False
+
         options = opts.get("options")
         if options:
             # Fixed options (=list of location IDs)
@@ -1512,6 +1513,8 @@ class S3LocationFilter(S3FilterWidget):
             # @ToDo: Allow override
             resource.add_filter(FS("%s$end_date" % selector) == None)
 
+            filters_added = True
+
         else:
             # Neither fixed options nor resource to look them up
             return default
@@ -1538,11 +1541,18 @@ class S3LocationFilter(S3FilterWidget):
         # Restore referee name
         db._referee_name = rname
 
+        if filters_added:
+            # Remove them
+            rfilter = resource.rfilter
+            rfilter.filters.pop()
+            rfilter.filters.pop()
+            rfilter.query = None
+
         rows2 = []
         if not rows:
             if values:
                 # Make sure the selected options are in the available options
-                resource = s3db.resource("gis_location")
+                resource2 = s3db.resource("gis_location")
                 fields = ["id"] + [l for l in levels]
                 if translate:
                     fields.append("path")
@@ -1553,17 +1563,17 @@ class S3LocationFilter(S3FilterWidget):
                     if not v:
                         continue
                     level = "L%s" % f.split("L", 1)[1][0]
-                    resource.clear_query()
+                    resource2.clear_query()
                     query = (gtable.level == level) & \
                             (gtable.name.belongs(v))
-                    resource.add_filter(query)
+                    resource2.add_filter(query)
                     # Filter out old Locations
                     # @ToDo: Allow override
-                    resource.add_filter(gtable.end_date == None)
-                    _rows = resource.select(fields=fields,
-                                            limit=None,
-                                            virtual=False,
-                                            as_rows=True)
+                    resource2.add_filter(gtable.end_date == None)
+                    _rows = resource2.select(fields=fields,
+                                             limit=None,
+                                             virtual=False,
+                                             as_rows=True)
                     if rows:
                         rows &= _rows
                     else:
@@ -1775,18 +1785,22 @@ class S3MapFilter(S3FilterWidget):
             @param values: the search values from the URL query
         """
 
-        if not current.deployment_settings.get_gis_spatialdb():
+        settings = current.deployment_settings
+
+        if not settings.get_gis_spatialdb():
             current.log.warning("No Spatial DB => Cannot do Intersects Query yet => Disabling S3MapFilter")
             return ""
 
-        attr = self.attr
+        attr_get = self.attr.get
+        opts_get = self.opts.get
 
-        if "_class" in attr and attr["_class"]:
-            _class = "%s %s" % (attr["_class"], self._class)
+        _class = attr_get("class")
+        if _class:
+            _class = "%s %s" % (_class, self._class)
         else:
             _class = self._class
 
-        _id = attr["_id"]
+        _id = attr_get("_id")
 
         # Hidden INPUT to store the WKT
         input = INPUT(_type="hidden",
@@ -1804,8 +1818,8 @@ class S3MapFilter(S3FilterWidget):
         map_id = "%s-map" % _id
 
         c, f = resource.tablename.split("_", 1)
-        c = attr.get("controller", c)
-        f = attr.get("function", f)
+        c = opts_get("controller", c)
+        f = opts_get("function", f)
 
         ltable = current.s3db.gis_layer_feature
         query = (ltable.controller == c) & \
@@ -1827,21 +1841,30 @@ class S3MapFilter(S3FilterWidget):
         feature_resources = [{"name"     : current.T(layer_name),
                               "id"       : "search_results",
                               "layer_id" : layer_id,
-                              "filter"   : attr.get("filter"),
+                              "filter"   : opts_get("filter"),
                               },
                              ]
 
+        button = opts_get("button")
+        if button:
+            # No need for the toolbar
+            toolbar = opts_get("toolbar", False)
+        else:
+            # Need the toolbar
+            toolbar = True
+
         _map = current.gis.show_map(id = map_id,
-                                    height = attr.get("height", 350),
-                                    width = attr.get("width", 425),
+                                    height = opts_get("height", settings.get_gis_map_height()),
+                                    width = opts_get("width", settings.get_gis_map_width()),
                                     collapsed = True,
                                     callback='''S3.search.s3map('%s')''' % map_id,
                                     feature_resources = feature_resources,
-                                    toolbar = True,
+                                    toolbar = toolbar,
                                     add_polygon = True,
                                     )
 
         return TAG[""](input,
+                       button,
                        _map,
                        )
 
@@ -2173,9 +2196,9 @@ class S3OptionsFilter(S3FilterWidget):
 
                         rows = current.db(query).select(key_field,
                                                         resource._id.min(),
-                                                        groupby=key_field,
-                                                        join=join,
-                                                        left=left,
+                                                        groupby = key_field,
+                                                        join = join,
+                                                        left = left,
                                                         )
 
                 # If we can not perform a reverse lookup, then we need

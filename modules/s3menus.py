@@ -129,16 +129,20 @@ class S3MainMenu(object):
         if not settings.get_L10n_display_toolbar():
             return None
 
-        languages = current.response.s3.l10n_languages
+        T = current.T
         request = current.request
+        languages = settings.get_L10n_languages()
+        represent_local = IS_ISO639_2_LANGUAGE_CODE.represent_local
 
         menu_lang = MM("Language", **attr)
         for language in languages:
-            menu_lang.append(MM(languages[language], r=request,
-                                translate=False,
-                                selectable=False,
-                                vars={"_language":language},
-                                ltr=True
+            # Show Language in it's own Language
+            menu_lang.append(MM(represent_local(language),
+                                r = request,
+                                translate = False,
+                                selectable = False,
+                                vars = {"_language": language},
+                                ltr = True
                                 ))
         return menu_lang
 
@@ -212,7 +216,8 @@ class S3MainMenu(object):
                                vars=dict(_next=login_next),
                                check=self_registration)
 
-            if settings.get_auth_password_changes():
+            if settings.get_auth_password_changes() and \
+               settings.get_auth_password_retrieval():
                 lost_pw = MM("Lost Password", m="retrieve_password")
             else:
                 lost_pw = None
@@ -879,6 +884,7 @@ class S3OptionsMenu(object):
         return M()(
                     M("Schools", c="edu", f="school")(
                         M("Create", m="create"),
+                        M("Import", m="import", p="create"),
                     ),
                     M("School Types", c="edu", f="school_type")(
                         M("Create", m="create"),
@@ -1552,6 +1558,10 @@ class S3OptionsMenu(object):
                         M("Create", m="create"),
                     ),
                     M(SECTORS, f="sector", restrict=[ADMIN])(
+                        M("Create", m="create"),
+                    ),
+                    M("Resource Types", f="resource_type",
+                      restrict=[ADMIN])(
                         M("Create", m="create"),
                     ),
                 )

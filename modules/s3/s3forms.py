@@ -30,6 +30,7 @@
 __all__ = ("S3SQLCustomForm",
            "S3SQLDefaultForm",
            "S3SQLDummyField",
+           "S3SQLVirtualField",
            "S3SQLSubFormLayout",
            "S3SQLVerticalSubFormLayout",
            "S3SQLInlineComponent",
@@ -1057,14 +1058,23 @@ class S3SQLCustomForm(S3SQLForm):
             for alias, name, field in fields:
 
                 if alias is None:
+                    # Field in the master table
                     if name in record:
-                        data[field.name] = record[name]
+                        value = record[name]
+                        # Field Method?
+                        if callable(value):
+                            value = value()
+                        data[field.name] = value
+
                 elif alias in subtables:
+                    # Field in a subtable
                     if alias in subrows and \
                        subrows[alias] is not None and \
                        name in subrows[alias]:
                         data[field.name] = subrows[alias][name]
+
                 elif hasattr(alias, "extract"):
+                    # Form element with custom extraction method
                     data[field.name] = alias.extract(resource, record_id)
 
         else:
@@ -1796,6 +1806,56 @@ class S3SQLField(S3SQLFormElement):
             raise SyntaxError("Invalid subtable: %s" % tname)
 
 # =============================================================================
+class S3SQLVirtualField(S3SQLFormElement):
+    """
+        A form element to embed values of field methods (virtual fields),
+        always read-only
+    """
+
+    # -------------------------------------------------------------------------
+    def resolve(self, resource):
+        """
+            Method to resolve this form element against the calling resource.
+
+            @param resource: the resource
+            @return: a tuple
+                        (
+                            subtable alias (or None for main table),
+                            original field name,
+                            Field instance for the form renderer
+                        )
+        """
+
+        table = resource.table
+        selector = self.selector
+
+        if not hasattr(table, selector):
+            raise SyntaxError("Undefined virtual field: %s" % selector)
+
+        label = self.options.label
+        if not label:
+            label = " ".join(s.capitalize() for s in selector.split("_"))
+
+        field = Field(selector,
+                      label = label,
+                      widget = self,
+                      )
+
+        return None, selector, field
+
+    # -------------------------------------------------------------------------
+    def __call__(self, field, value, **attributes):
+        """
+            Widget renderer for field method values, renders a simple
+            read-only DIV with the value
+        """
+
+        widget = DIV(value, **attributes)
+        widget.add_class("s3-virtual-field")
+
+        return widget
+
+# =============================================================================
 class S3SQLDummyField(S3SQLFormElement):
     """
         A Dummy Field
@@ -1978,6 +2038,9 @@ class SKIP_POST_VALIDATION(Validator):
 class S3SQLSubFormLayout(object):
     """ Layout for S3SQLInlineComponent (Base Class) """
 
+    # Layout-specific CSS class for the inline component
+    layout_class = "subform-default"
+
     def __init__(self):
         """ Constructor """
 
@@ -2022,7 +2085,7 @@ class S3SQLSubFormLayout(object):
             subform = TABLE(headers,
                             TBODY(item_rows),
                             TFOOT(action_rows),
-                            _class="embeddedComponent",
+                            _class= " ".join(("embeddedComponent", self.layout_class)),
                             )
         return subform
 
@@ -2161,25 +2224,41 @@ class S3SQLSubFormLayout(object):
             else:
                 return DIV(btn)
 
+
+        # CSS class for action-columns
+        _class = "subform-action"
+
         # Render the action icons for this row
         append = subform.append
         if readonly:
             if editable:
-                append(action(T("Edit this entry"), "edt"))
+                append(TD(action(T("Edit this entry"), "edt"),
+                          _class = _class,
+                          ))
             else:
-                append(TD())
+                append(TD(_class=_class))
 
             if deletable:
-                append(action(T("Remove this entry"), "rmv"))
+                append(TD(action(T("Remove this entry"), "rmv"),
+                          _class = _class,
+                          ))
             else:
-                append(TD())
+                append(TD(_class=_class))
         else:
             if index != "none" or item:
-                append(action(T("Update this entry"), "rdy", throbber=True))
-                append(action(T("Cancel editing"), "cnc"))
+                append(TD(action(T("Update this entry"), "rdy", throbber=True),
+                          _class = _class,
+                          ))
+                append(TD(action(T("Cancel editing"), "cnc"),
+                          _class = _class,
+                          ))
             else:
-                append(TD())
-                append(action(T("Add this entry"), "add", throbber=True))
+                append(TD(action(T("Discard this entry"), "dsc"),
+                          _class=_class,
+                          ))
+                append(TD(action(T("Add this entry"), "add", throbber=True),
+                          _class = _class,
+                          ))
 
     # -------------------------------------------------------------------------
     def rowstyle_read(self, form, fields, *args, **kwargs):
@@ -2246,6 +2325,9 @@ class S3SQLVerticalSubFormLayout(S3SQLSubFormLayout):
         - standard horizontal layout for read-rows
         - hiding header row if there are no visible read-rows
     """
+
+    # Layout-specific CSS class for the inline component
+    layout_class = "subform-vertical"
 
     # -------------------------------------------------------------------------
     def headers(self, data, readonly=False):

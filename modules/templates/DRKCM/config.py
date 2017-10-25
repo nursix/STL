@@ -4,7 +4,7 @@ import datetime
 
 from collections import OrderedDict
 
-from gluon import current, IS_IN_SET, SPAN
+from gluon import current, A, DIV, IS_EMPTY_OR, IS_IN_SET, IS_NOT_EMPTY, SPAN, URL
 from gluon.storage import Storage
 
 from s3 import FS, IS_ONE_OF, S3DateTime, S3Method, s3_str, s3_unicode
@@ -37,6 +37,7 @@ def config(settings):
                                                "volunteer": T("Volunteer"),
                                                }
     #settings.auth.registration_link_user_to_default = "staff"
+    settings.auth.password_retrieval = False
 
     # Approval emails get sent to all admins
     settings.mail.approver = "ADMIN"
@@ -45,6 +46,7 @@ def config(settings):
     # NB This can also be over-ridden for specific contexts later
     # e.g. Activities filtered to those of parent Project
     settings.gis.countries = ("DE",)
+    gis_levels = ("L1", "L2", "L3")
     # Uncomment to display the Map Legend as a floating DIV
     settings.gis.legend = "float"
     # Uncomment to Disable the Postcode selector in the LocationSelector
@@ -64,7 +66,7 @@ def config(settings):
     # Languages used in the deployment (used for Language Toolbar & GIS Locations)
     # http://www.loc.gov/standards/iso639-2/php/code_list.php
     settings.L10n.languages = OrderedDict([
-       ("de", "Deutsch"),
+       ("de", "German"),
        ("en", "English"),
     ])
     # Default language for Language Toolbar (& GIS Locations in future)
@@ -112,6 +114,135 @@ def config(settings):
     settings.security.version_info_requires_login = True
 
     # -------------------------------------------------------------------------
+    # General UI settings
+    #
+    settings.ui.calendar_clear_icon = True
+
+    # -------------------------------------------------------------------------
+    # Realm Rules
+    #
+    def drk_realm_entity(table, row):
+        """
+            Assign a Realm Entity to records
+        """
+
+        db = current.db
+        s3db = current.s3db
+
+        tablename = table._ot or table._tablename
+
+        realm_entity = 0
+
+        if tablename == "pr_person":
+
+            # Client records are owned by the organisation
+            # the case is assigned to
+            ctable = s3db.dvr_case
+            query = (ctable.person_id == row.id) & \
+                    (ctable.deleted == False)
+            case = db(query).select(ctable.organisation_id,
+                                    limitby = (0, 1),
+                                    ).first()
+
+            if case and case.organisation_id:
+                realm_entity = s3db.pr_get_pe_id("org_organisation",
+                                                 case.organisation_id,
+                                                 )
+
+        elif tablename in ("dvr_case_activity",
+                           "dvr_case_details",
+                           "dvr_case_flag_case",
+                           "dvr_case_language",
+                           "dvr_note",
+                           "dvr_residence_status",
+                           "pr_group_membership",
+                           "pr_person_details",
+                           "pr_person_tag",
+                           ):
+
+            # Inherit from person via person_id
+            table = s3db.table(tablename)
+            ptable = s3db.pr_person
+            query = (table._id == row.id) & \
+                    (ptable.id == table.person_id)
+            person = db(query).select(ptable.realm_entity,
+                                      limitby = (0, 1),
+                                      ).first()
+            if person:
+                realm_entity = person.realm_entity
+
+        elif tablename in ("pr_address",
+                           "pr_contact",
+                           "pr_contact_emergency",
+                           "pr_image",
+                           ):
+
+            # Inherit from person via PE
+            table = s3db.table(tablename)
+            ptable = s3db.pr_person
+            query = (table._id == row.id) & \
+                    (ptable.pe_id == table.pe_id)
+            person = db(query).select(ptable.realm_entity,
+                                      limitby = (0, 1),
+                                      ).first()
+            if person:
+                realm_entity = person.realm_entity
+
+        elif tablename in ("dvr_case_activity_need",
+                           "dvr_case_activity_update",
+                           "dvr_response_action",
+                           ):
+
+            # Inherit from case activity
+            table = s3db.table(tablename)
+            atable = s3db.dvr_case_activity
+            query = (table._id == row.id) & \
+                    (atable.id == table.case_activity_id)
+            activity = db(query).select(atable.realm_entity,
+                                        limitby = (0, 1),
+                                        ).first()
+            if activity:
+                realm_entity = activity.realm_entity
+
+        elif tablename == "pr_group":
+
+            # No realm-entity for case groups
+            table = s3db.pr_group
+            query = table._id == row.id
+            group = db(query).select(table.group_type,
+                                     limitby = (0, 1),
+                                     ).first()
+            if group and group.group_type == 7:
+                realm_entity = None
+
+        elif tablename == "project_task":
+
+            # Inherit the realm entity from the assignee
+            assignee_pe_id = row.pe_id
+            instance_type = s3db.pr_instance_type(assignee_pe_id)
+            if instance_type:
+                table = s3db.table(instance_type)
+                query = table.pe_id == assignee_pe_id
+                assignee = db(query).select(table.realm_entity,
+                                            limitby = (0, 1),
+                                            ).first()
+                if assignee and assignee.realm_entity:
+                    realm_entity = assignee.realm_entity
+
+            # If there is no assignee, or the assignee has no
+            # realm entity, fall back to the user organisation
+            if realm_entity == 0:
+                auth = current.auth
+                user_org_id = auth.user.organisation_id if auth.user else None
+                if user_org_id:
+                    realm_entity = s3db.pr_get_pe_id("org_organisation",
+                                                    user_org_id,
+                                                    )
+        return realm_entity
+
+    settings.auth.realm_entity = drk_realm_entity
+
+    # -------------------------------------------------------------------------
     # CMS Module Settings
     #
     settings.cms.hide_index = True
@@ -119,12 +250,27 @@ def config(settings):
     # -------------------------------------------------------------------------
     # Human Resource Module Settings
     #
-    settings.hrm.teams_orgs = False
+    settings.hrm.teams_orgs = True
+    settings.hrm.staff_departments = False
+
+    settings.hrm.use_id = False
+    settings.hrm.use_address = True
+    settings.hrm.use_description = False
+
+    settings.hrm.use_trainings = False
+    settings.hrm.use_certificates = False
+    settings.hrm.use_credentials = False
+    settings.hrm.use_awards = False
+
+    settings.hrm.use_skills = False
+    settings.hrm.staff_experience = False
+    settings.hrm.vol_experience = False
 
     # -------------------------------------------------------------------------
     # Organisations Module Settings
     #
     settings.org.branches = True
+    settings.org.offices_tab = False
 
     # -------------------------------------------------------------------------
     # Persons Module Settings
@@ -133,29 +279,7 @@ def config(settings):
     settings.pr.separate_name_fields = 2
     settings.pr.name_format= "%(last_name)s, %(first_name)s"
 
-    # -------------------------------------------------------------------------
-    # Project Module Settings
-    #
-    settings.project.mode_task = True
-    settings.project.sectors = False
-
-    # NB should not add or remove options, but just comment/uncomment
-    settings.project.task_status_opts = {#1: T("Draft"),
-                                         2: T("New"),
-                                         3: T("Assigned"),
-                                         #4: T("Feedback"),
-                                         #5: T("Blocked"),
-                                         6: T("On Hold"),
-                                         7: T("Canceled"),
-                                         #8: T("Duplicate"),
-                                         #9: T("Ready"),
-                                         #10: T("Verified"),
-                                         #11: T("Reopened"),
-                                         12: T("Completed"),
-                                         }
-
-    settings.project.task_time = False
-    settings.project.my_tasks_include_team_tasks = True
+    settings.pr.contacts_tabs = {"all": "Contact Info"}
 
     # -------------------------------------------------------------------------
     # DVR Module Settings and Customizations
@@ -181,11 +305,11 @@ def config(settings):
     settings.dvr.response_types_hierarchical = True
 
     # Expose flags to mark appointment types as mandatory
-    settings.dvr.mandatory_appointments = True
+    settings.dvr.mandatory_appointments = False
     # Appointments with personal presence update last_seen_on
-    settings.dvr.appointments_update_last_seen_on = True
+    settings.dvr.appointments_update_last_seen_on = False
     # Automatically update the case status when appointments are completed
-    settings.dvr.appointments_update_case_status = True
+    settings.dvr.appointments_update_case_status = False
     # Automatically close appointments when registering certain case events
     settings.dvr.case_events_close_appointments = True
 
@@ -199,14 +323,69 @@ def config(settings):
 
     # -------------------------------------------------------------------------
     def customise_dvr_home():
-        """ Redirect dvr/index to dvr/person?closed=0 """
+        """ Do not redirect to person-controller """
 
-        from gluon import URL
-        from s3 import s3_redirect_default
-
-        s3_redirect_default(URL(f="person", vars={"closed": "0"}))
+        return {"module_name": T("Case Consulting"),
+                }
 
     settings.customise_dvr_home = customise_dvr_home
+
+    # -------------------------------------------------------------------------
+    def pr_address_onaccept(form):
+        """
+            Custom onaccept to set the person's Location to the Private Address
+            - unless their case is associated with a Site
+        """
+
+        try:
+            record_id = form.vars.id
+        except AttributeError:
+            # Nothing we can do
+            return
+
+        db = current.db
+        s3db = current.s3db
+
+        atable = db.pr_address
+        row = db(atable.id == record_id).select(atable.location_id,
+                                                atable.pe_id,
+                                                limitby=(0, 1),
+                                                ).first()
+        try:
+            location_id = row.location_id
+        except:
+            # Nothing we can do
+            return
+
+        pe_id = row.pe_id
+
+        ctable = s3db.dvr_case
+        ptable = s3db.pr_person
+        query = (ptable.pe_id == pe_id) & \
+                (ptable.id == ctable.person_id)
+        case = db(query).select(ctable.site_id,
+                                limitby=(0, 1),
+                                ).first()
+
+        if case and not case.site_id:
+            db(ptable.pe_id == pe_id).update(location_id = location_id,
+                                             # Indirect update by system rule,
+                                             # do not change modified_* fields:
+                                             modified_on = ptable.modified_on,
+                                             modified_by = ptable.modified_by,
+                                             )
+
+    # -------------------------------------------------------------------------
+    def customise_pr_address_resource(r, tablename):
+
+        # Custom onaccept to set the Person's Location to this address
+        # - unless their case is associated with a Site
+        current.s3db.add_custom_callback("pr_address",
+                                         "onaccept",
+                                         pr_address_onaccept,
+                                         )
+
+    settings.customise_pr_address_resource = customise_pr_address_resource
 
     # -------------------------------------------------------------------------
     def customise_pr_contact_resource(r, tablename):
@@ -269,6 +448,25 @@ def config(settings):
                 if field.name != "shelter_unit_id" or not is_staff:
                     field.writable = False
 
+        # Configure components to inherit realm_entity
+        # from the person record
+        s3db.configure("pr_person",
+                       realm_components = ("case_activity",
+                                           "case_details",
+                                           "dvr_flag",
+                                           "case_language",
+                                           "case_note",
+                                           "residence_status",
+                                           "address",
+                                           "contact",
+                                           "contact_emergency",
+                                           "group_membership",
+                                           "image",
+                                           "person_details",
+                                           "person_tag",
+                                           ),
+                       )
+
     settings.customise_pr_person_resource = customise_pr_person_resource
 
     # -------------------------------------------------------------------------
@@ -316,18 +514,36 @@ def config(settings):
 
             if r.controller == "dvr":
 
-                from gluon import Field, IS_EMPTY_OR, IS_IN_SET, IS_NOT_EMPTY
+                from gluon import Field
 
                 resource = r.resource
                 configure = resource.configure
 
+                # Set contacts-method for tab
                 s3db.set_method("pr", "person",
                                 method = "contacts",
                                 action = s3db.pr_Contacts,
                                 )
 
+                # Autocomplete search-method
+                search_fields = ("first_name", "last_name")
+                s3db.set_method("pr", "person",
+                                method = "search_ac",
+                                action = s3db.pr_PersonSearchAutocomplete(search_fields),
+                                )
+
                 table = r.table
                 ctable = s3db.dvr_case
+
+                # Case-sites must be shelters
+                field = ctable.site_id
+                field.label = T("Shelter")
+                field.represent = s3db.org_SiteRepresent(show_type=False)
+                requires = field.requires
+                if isinstance(requires, IS_EMPTY_OR):
+                    requires = requires.other
+                if hasattr(requires, "instance_types"):
+                    requires.instance_types = ("cr_shelter",)
 
                 if not r.component:
 
@@ -345,6 +561,7 @@ def config(settings):
                         from s3 import S3SQLCustomForm, \
                                        S3SQLInlineComponent, \
                                        S3SQLInlineLink, \
+                                       S3SQLVerticalSubFormLayout, \
                                        S3TextFilter, \
                                        S3DateFilter, \
                                        S3OptionsFilter, \
@@ -354,6 +571,7 @@ def config(settings):
                         # Default organisation
                         ctable = s3db.dvr_case
                         field = ctable.organisation_id
+                        field.comment = None
                         user_org = auth.user.organisation_id if auth.user else None
                         if user_org:
                             field.default = user_org
@@ -365,6 +583,10 @@ def config(settings):
 
                         # Expose human_resource_id
                         field = ctable.human_resource_id
+                        field.comment = None
+                        human_resource_id = auth.s3_logged_in_human_resource()
+                        if human_resource_id:
+                            field.default = human_resource_id
                         field.readable = field.writable = True
                         field.widget = None
 
@@ -374,6 +596,13 @@ def config(settings):
                         options = dict(s3db.pr_marital_status_opts)
                         del options[9] # Remove "other"
                         field.requires = IS_IN_SET(options, zero=None)
+
+                        # Remove Add-links in residence status
+                        rtable = s3db.dvr_residence_status
+                        field = rtable.status_type_id
+                        field.comment = None
+                        field = rtable.permit_type_id
+                        field.comment = None
 
                         # Make gender mandatory, remove "unknown"
                         field = table.gender
@@ -394,6 +623,7 @@ def config(settings):
                         crud_form = S3SQLCustomForm(
 
                             # Case Details ----------------------------
+                            "dvr_case.date",
                             "dvr_case.organisation_id",
                             "dvr_case.human_resource_id",
                             (T("Case Status"), "dvr_case.status_id"),
@@ -415,6 +645,8 @@ def config(settings):
 
                             # Process Data ----------------------------
                             "dvr_case.site_id",
+                            (T("Moving-in Date"), "dvr_case_details.on_site_from"),
+                            (T("Moving-out Date"), "dvr_case_details.on_site_until"),
                             S3SQLInlineComponent(
                                     "address",
                                     label = T("Current Address"),
@@ -426,7 +658,6 @@ def config(settings):
                                     link = False,
                                     multiple = False,
                                     ),
-                            (T("Date of Arrival"), "dvr_case.date"),
                             S3SQLInlineComponent(
                                     "bamf",
                                     fields = [("", "value"),
@@ -438,8 +669,21 @@ def config(settings):
                                     multiple = False,
                                     name = "bamf",
                                     ),
-                            "dvr_case.valid_until",
-                            "dvr_case.stay_permit_until",
+                            (T("Date of Entry"), "dvr_case_details.arrival_date"),
+                            S3SQLInlineComponent(
+                                    "residence_status",
+                                    fields = ["status_type_id",
+                                              "permit_type_id",
+                                              #"reference",
+                                              #"valid_from",
+                                              "valid_until",
+                                              "comments",
+                                              ],
+                                    label = T("Residence Status"),
+                                    #multiple = False,
+                                    layout = S3SQLVerticalSubFormLayout,
+                                    explicit_add = T("Add Residence Status"),
+                                    ),
 
                             # Other Details ---------------------------
                             "person_details.occupation",
@@ -553,6 +797,26 @@ def config(settings):
 
                     configure(list_fields = list_fields)
 
+            elif r.controller == "default":
+
+                # Personal Profile
+
+                if r.component_name == "group_membership":
+
+                    # Team memberships are read-only
+                    r.component.configure(insertable = False,
+                                          editable = False,
+                                          deletable = False,
+                                          )
+
+                elif r.component_name == "human_resource":
+
+                    # Staff/Volunteer records are read-only
+                    r.component.configure(insertable = False,
+                                          editable = False,
+                                          deletable = False,
+                                          )
+
             return result
         s3.prep = custom_prep
 
@@ -564,6 +828,65 @@ def config(settings):
         return attr
 
     settings.customise_pr_person_controller = customise_pr_person_controller
+
+    # -------------------------------------------------------------------------
+    def customise_pr_group_controller(**attr):
+
+        s3db = current.s3db
+        s3 = current.response.s3
+
+        # Custom prep
+        standard_prep = s3.prep
+        def custom_prep(r):
+
+            # Call standard prep
+            if callable(standard_prep):
+                result = standard_prep(r)
+            else:
+                result = True
+
+            if r.controller in ("hrm", "vol"):
+
+                if not r.component:
+
+                    # No inline-adding new organisations
+                    ottable = s3db.org_organisation_team
+                    field = ottable.organisation_id
+                    field.comment = None
+
+                    # Organisation is required
+                    from s3 import S3SQLCustomForm, \
+                                   S3SQLInlineComponent
+                    crud_form = S3SQLCustomForm(
+                                    "name",
+                                    "description",
+                                    S3SQLInlineComponent("organisation_team",
+                                                         label = T("Organization"),
+                                                         fields = ["organisation_id"],
+                                                         multiple = False,
+                                                         required = True,
+                                                         ),
+                                    "comments",
+                                    )
+                    r.resource.configure(crud_form = crud_form)
+
+                elif r.component_name == "group_membership":
+
+                    from s3 import S3PersonAutocompleteWidget
+
+                    # Make sure only HRs can be added to teams
+                    mtable = s3db.pr_group_membership
+                    field = mtable.person_id
+                    field.widget = S3PersonAutocompleteWidget(
+                                        #controller="hrm",
+                                        ajax_filter="human_resource.id__ne=None",
+                                        )
+            return result
+        s3.prep = custom_prep
+
+        return attr
+
+    settings.customise_pr_group_controller = customise_pr_group_controller
 
     # -------------------------------------------------------------------------
     def customise_pr_group_membership_controller(**attr):
@@ -586,16 +909,27 @@ def config(settings):
             resource = r.resource
             if r.controller == "dvr":
 
+                # Set contacts-method to retain the tab
+                s3db.set_method("pr", "person",
+                                method = "contacts",
+                                action = s3db.pr_Contacts,
+                                )
+
                 if r.interactive:
                     table = resource.table
 
-                    from gluon import IS_EMPTY_OR
-                    from s3 import IS_ADD_PERSON_WIDGET2, S3AddPersonWidget2
+                    #from s3 import IS_ADD_PERSON_WIDGET2, S3AddPersonWidget2
+                    from s3 import S3AddPersonWidget
 
                     field = table.person_id
                     field.represent = s3db.pr_PersonRepresent(show_link=True)
-                    field.requires = IS_ADD_PERSON_WIDGET2()
-                    field.widget = S3AddPersonWidget2(controller="dvr")
+                    #field.requires = IS_ADD_PERSON_WIDGET2()
+                    #field.widget = S3AddPersonWidget2(controller="dvr")
+                    field.requires = IS_ONE_OF(current.db, "pr_person.id")
+                    s3db.pr_person.pe_label.label = T("ID")
+                    field.widget = S3AddPersonWidget(controller = "dvr",
+                                                     pe_label = True,
+                                                     )
 
                     field = table.role_id
                     field.readable = field.writable = True
@@ -650,24 +984,166 @@ def config(settings):
     settings.customise_pr_group_membership_controller = customise_pr_group_membership_controller
 
     # -------------------------------------------------------------------------
+    def dvr_case_onaccept(form):
+        """
+            Additional custom-onaccept for dvr_case to:
+            * Force-update the realm entity of the person record:
+            - the organisation managing the case is the realm-owner,
+              but the person record is written first, so we need to
+              update it after writing the case
+            - the case can be transferred to another organisation/branch,
+              and then the person record needs to be transferred to that
+              same realm as well
+            * Update the Population of all Shelters
+            * Update the Location of the person record:
+            - if the Case is linked to a Site then use that for the Location of
+              the Person
+            - otherwise use the Private Address
+        """
+
+        try:
+            form_vars = form.vars
+        except AttributeError:
+            return
+
+        record_id = form_vars.id
+        if not record_id:
+            # Nothing we can do
+            return
+
+        db = current.db
+        s3db = current.s3db
+
+        # Update the Population of all Shelters
+        cr_shelter_population()
+
+        # Get the Person ID & Site ID for this case
+        person_id = form_vars.person_id
+        if not person_id or "site_id" not in form_vars:
+            # Reload the record
+            table = s3db.dvr_case
+            query = (table.id == record_id)
+            row = db(query).select(table.person_id,
+                                   table.site_id,
+                                   limitby = (0, 1),
+                                   ).first()
+
+            if row:
+                person_id = row.person_id
+                site_id = row.site_id
+        else:
+            site_id = form_vars.site_id
+
+        if person_id:
+
+            set_realm_entity = current.auth.set_realm_entity
+
+            # Configure components to inherit realm_entity
+            # from the person record
+            s3db.configure("pr_person",
+                           realm_components = ("case_activity",
+                                               "case_details",
+                                               "dvr_flag",
+                                               "case_language",
+                                               "case_note",
+                                               "residence_status",
+                                               "address",
+                                               "contact",
+                                               "contact_emergency",
+                                               "group_membership",
+                                               "image",
+                                               "person_details",
+                                               "person_tag",
+                                               ),
+                           )
+
+            # Force-update the realm entity for the person
+            set_realm_entity("pr_person", person_id, force_update=True)
+
+            # Configure components to inherit realm entity
+            # from the case activity record
+            s3db.configure("dvr_case_activity",
+                           realm_components = ("case_activity_need",
+                                               "case_activity_update",
+                                               "response_action",
+                                               ),
+                           )
+
+            # Force-update the realm entity for all case activities
+            # linked to the person_id
+            atable = s3db.dvr_case_activity
+            query = (atable.person_id == person_id)
+            set_realm_entity(atable, query, force_update=True)
+
+            # Update the person's location_id
+            ptable = s3db.pr_person
+            location_id = None
+
+            if site_id:
+                # Use the Shelter's Address
+                stable = s3db.org_site
+                site = db(stable.site_id == site_id).select(stable.location_id,
+                                                            limitby = (0, 1),
+                                                            ).first()
+                if site:
+                    location_id = site.location_id
+            else:
+                # Use the Private Address (no need to filter by address type as only
+                # 'Current Address' is exposed)
+                # NB If this is a New/Modified Address then this won't be caught here
+                # - we use pr_address_onaccept to catch those
+                atable = s3db.pr_address
+                query = (ptable.id == person_id) & \
+                        (ptable.pe_id == atable.pe_id) & \
+                        (atable.deleted == False)
+                address = db(query).select(atable.location_id,
+                                           limitby = (0, 1),
+                                           ).first()
+                if address:
+                    location_id = address.location_id
+
+            db(ptable.id == person_id).update(location_id = location_id,
+                                              # Indirect update by system rule,
+                                              # do not change modified_* fields:
+                                              modified_on = ptable.modified_on,
+                                              modified_by = ptable.modified_by,
+                                              )
+
+    # -------------------------------------------------------------------------
     def customise_dvr_case_resource(r, tablename):
 
         s3db = current.s3db
         ctable = s3db.dvr_case
 
-        # Expose expiration dates
-        field = ctable.valid_until
-        field.label = T("BÜMA valid until")
-        field.readable = field.writable = True
-        field = ctable.stay_permit_until
-        field.readable = field.writable = True
+        get_vars = r.get_vars
+        if r.function == "group_membership" and "viewing" in get_vars:
 
-        # Set all fields read-only except comments, unless
-        # the user has permission to create cases
-        if not current.auth.s3_has_permission("create", "dvr_case"):
-            for field in ctable:
-                if field.name != "comments":
-                    field.writable = False
+            # Creating a case file for a new family member
+            # => default to same organisation as primary case
+            try:
+                vtablename, record_id = get_vars["viewing"].split(".")
+            except ValueError:
+                vtablename, record_id = None, None
+
+            if vtablename == "pr_person":
+                query = (ctable.person_id == record_id)
+                row = current.db(query).select(ctable.organisation_id,
+                                               limitby = (0, 1),
+                                               ).first()
+                if row:
+                    ctable.organisation_id.default = row.organisation_id
+
+        # Custom onaccept to update realm-entity of the
+        # beneficiary and case activities of this case
+        # (incl. their respective realm components)
+        s3db.add_custom_callback("dvr_case",
+                                 "onaccept",
+                                 dvr_case_onaccept,
+                                 )
+
+        # Update the realm-entity when the case gets updated
+        # (because the assigned organisation/branch can change)
+        s3db.configure("dvr_case", update_realm = True)
 
     settings.customise_dvr_case_resource = customise_dvr_case_resource
 
@@ -793,19 +1269,14 @@ def config(settings):
     # -------------------------------------------------------------------------
     def customise_dvr_case_activity_resource(r, tablename):
 
+        db = current.db
         auth = current.auth
         s3db = current.s3db
 
+        human_resource_id = auth.s3_logged_in_human_resource()
+
         if r.interactive or r.representation == "aadata":
 
-            # Can the user see cases from more than one org?
-            realms = auth.permission.permitted_realms("dvr_case", "read")
-            if realms is None or len(realms) > 1:
-                multiple_orgs = True
-            else:
-                multiple_orgs = False
-
-            from gluon import IS_IN_SET
             from gluon.sqlhtml import OptionsWidget
             from s3 import S3SQLCustomForm, \
                            S3SQLInlineLink, \
@@ -819,12 +1290,41 @@ def config(settings):
 
             # Represent person_id as link
             field = table.person_id
-            field.represent = s3db.pr_PersonRepresent(show_link=True)
+            fmt = "%(pe_label)s %(last_name)s, %(first_name)s"
+            field.represent = s3db.pr_PersonRepresent(fields = ("pe_label",
+                                                                "last_name",
+                                                                "first_name",
+                                                                ),
+                                                      labels = fmt,
+                                                      show_link = True,
+                                                      )
+
+            # Customise sector
+            field = table.sector_id
+            field.comment = None
+
+            # Show subject field
+            field = table.subject
+            field.readable = field.writable = True
+            field.requires = IS_NOT_EMPTY()
 
             # Customise Priority
             field = table.priority
-            field.label = T("Priority")
+            priority_opts = [(0, T("Emergency")),
+                             (1, T("High")),
+                             (2, T("Normal")),
+                             (3, T("Low")),
+                             ]
             field.readable = field.writable = True
+            field.label = T("Priority")
+            field.default = 2
+            field.requires = IS_IN_SET(priority_opts, sort=False, zero=None)
+            field.represent = PriorityRepresent(priority_opts,
+                                                {0: "red",
+                                                 1: "blue",
+                                                 2: "lightblue",
+                                                 3: "grey",
+                                                 }).represent
 
             # Customise "completed" flag
             # => label as "Status" and use drop-down for open/closed
@@ -848,59 +1348,91 @@ def config(settings):
             field.label = T("Completed on")
             field.readable = True
 
-            # Responses
-            rtable = s3db.dvr_response_action
-
-            # Assigned-to field: simple drop-down, no Add-link
-            field = rtable.human_resource_id
-            field.label = T("Assigned to")
+            # Show human_resource_id
+            field = table.human_resource_id
+            field.readable = field.writable = True
+            field.label = T("Consultant in charge")
+            field.default = human_resource_id
             field.widget = None
             field.comment = None
 
+            # Inline-needs
+            ntable = current.s3db.dvr_case_activity_need
+
+            field = ntable.human_resource_id
+            field.default = human_resource_id
+            field.widget = field.comment = None
+
+            field = ntable.need_id
+            field.comment = None
+
+            # Inline-responses
+            rtable = s3db.dvr_response_action
+
+            field = rtable.human_resource_id
+            field.label = T("Assigned to")
+            field.default = human_resource_id
+            field.widget = field.comment = None
+
+            # Inline-updates
+            utable = current.s3db.dvr_case_activity_update
+
+            field = utable.human_resource_id
+            field.default = human_resource_id
+            field.widget = field.comment = None
+
+            from s3 import S3SQLVerticalSubFormLayout
             crud_form = S3SQLCustomForm(
                             "person_id",
 
                             "sector_id",
 
+                            "subject",
+                            (T("Initial Situation Details"), ("need_details")),
+
                             "start_date",
-                            "need_details",
+                            "priority",
+                            "human_resource_id",
 
                             S3SQLInlineComponent("case_activity_need",
-                                                 label = T("Needs"),
+                                                 label = T("Needs Assessment"),
                                                  fields = [
-                                                     "need_id",
                                                      "date",
+                                                     "need_id",
+                                                     (T("Details"), "comments"),
                                                      "human_resource_id",
-                                                     "comments",
                                                      ],
+                                                 layout = S3SQLVerticalSubFormLayout,
+                                                 explicit_add = T("Add Need"),
                                                  ),
 
                             S3SQLInlineComponent("response_action",
-                                                 label = T("Measures"),
+                                                 label = T("Actions"),
                                                  fields = [
                                                      "response_type_id",
-                                                     (T("Details"), "comments"),
                                                      "date_due",
+                                                     "comments",
                                                      "human_resource_id",
-                                                     "status_id",
                                                      #"date",
+                                                     "status_id",
                                                      ],
+                                                 layout = S3SQLVerticalSubFormLayout,
+                                                 explicit_add = T("Add Action"),
                                                  ),
-
-                            #"priority",
-                            "emergency",
 
                             "followup",
                             "followup_date",
 
                             S3SQLInlineComponent("case_activity_update",
-                                                 label = T("Updates"),
+                                                 label = T("Progress"),
                                                  fields = [
                                                      "date",
-                                                     "update_type_id",
+                                                     (T("Occasion"), "update_type_id"),
                                                      "human_resource_id",
                                                      "comments",
                                                      ],
+                                                 layout = S3SQLVerticalSubFormLayout,
+                                                 explicit_add = T("Add Entry"),
                                                  ),
 
                             "status_id",
@@ -921,72 +1453,22 @@ def config(settings):
                             "comments",
                             )
 
-            # Filter widgets
-            filter_widgets = [
-                S3TextFilter(["person_id$pe_label",
-                              "person_id$first_name",
-                              "person_id$last_name",
-                              "case_id$reference",
-                              "need_details",
-                              "activity_details",
-                              ],
-                              label = T("Search"),
-                              ),
-                S3OptionsFilter("emergency",
-                                options = {True: T("Yes"),
-                                           False: T("No"),
-                                           },
-                                cols = 2,
-                                ),
-                S3OptionsFilter("need_id",
-                                options = lambda: s3_get_filter_opts("dvr_need",
-                                                                     translate = True,
-                                                                     ),
-                                ),
-                S3OptionsFilter("completed",
-                                default = False,
-                                options = {True: COMPLETED,
-                                           False: CURRENT,
-                                           },
-                                cols = 2,
-                                ),
-                S3OptionsFilter("followup",
-                                label = T("Follow-up required"),
-                                options = {True: T("Yes"),
-                                           False: T("No"),
-                                           },
-                                cols = 2,
-                                hidden = True,
-                                ),
-                S3DateFilter("followup_date",
-                             cols = 2,
-                             hidden = True,
-                             ),
-                ]
-            if multiple_orgs:
-                filter_widgets.insert(1,
-                                      S3OptionsFilter("person_id$dvr_case.organisation_id"),
-                                      )
-
             s3db.configure("dvr_case_activity",
                            crud_form = crud_form,
-                           filter_widgets = filter_widgets,
+                           #filter_widgets = filter_widgets,
+                           orderby = "dvr_case_activity.priority",
                            )
 
         # Custom list fields for case activity component tab
         if r.tablename != "dvr_case_activity":
-            list_fields = ["start_date",
+            list_fields = ["priority",
                            "sector_id",
-                           #"need_id",
-                           #"need_details",
-                           "emergency",
-                           #(T("Interventions"),
-                            #"response_type__link.response_type_id",
-                            #),
-                           #"activity_details",
-                           "followup",
-                           "followup_date",
-                           "completed",
+                           "subject",
+                           #"followup",
+                           #"followup_date",
+                           "start_date",
+                           "human_resource_id",
+                           "status_id",
                            ]
 
             # Custom list fields
@@ -994,12 +1476,23 @@ def config(settings):
                            list_fields = list_fields,
                            )
 
+        # Configure components to inherit realm entity
+        # from the case activity record
+        s3db.configure("dvr_case_activity",
+                       realm_components = ("case_activity_need",
+                                           "case_activity_update",
+                                           "response_action",
+                                           ),
+                       )
+
     settings.customise_dvr_case_activity_resource = customise_dvr_case_activity_resource
 
     # -------------------------------------------------------------------------
     def customise_dvr_case_activity_controller(**attr):
 
+        auth = current.auth
         s3db = current.s3db
+
         s3 = current.response.s3
 
         # Custom prep
@@ -1014,37 +1507,130 @@ def config(settings):
 
             resource = r.resource
 
+            # Configure person tags
+            configure_person_tags()
+
+            # Adapt list title when filtering for priority 0 (Emergency)
+            if r.get_vars.get("~.priority") == "0":
+                emergencies = True
+                s3.crud_strings["dvr_case_activity"]["title_list"] = T("Emergencies")
+            else:
+                emergencies = False
+
             # Filter to active cases
             if not r.record:
                 query = (FS("person_id$dvr_case.archived") == False) | \
                         (FS("person_id$dvr_case.archived") == None)
                 resource.add_filter(query)
 
-            if not r.component:
-                filter_widgets = resource.get_config("filter_widgets")
-                if filter_widgets:
+            if not r.component and not r.record:
 
-                    configure_person_tags()
+                from s3 import S3TextFilter, \
+                               S3OptionsFilter, \
+                               S3DateFilter, \
+                               s3_get_filter_opts
+
+                db = current.db
+
+                # Status filter options + defaults
+                stable = s3db.dvr_case_activity_status
+                query = (stable.deleted == False)
+                rows = db(query).select(stable.id,
+                                        stable.name,
+                                        stable.is_closed,
+                                        cache = s3db.cache,
+                                        orderby = stable.workflow_position,
+                                        )
+                status_filter_options = OrderedDict((row.id, T(row.name))
+                                                    for row in rows)
+                status_filter_defaults = [row.id for row in rows
+                                                 if not row.is_closed]
+
+                # Filter widgets
+                filter_widgets = [
+                    S3TextFilter(["person_id$pe_label",
+                                  "person_id$first_name",
+                                  "person_id$last_name",
+                                  "need_details",
+                                  ],
+                                  label = T("Search"),
+                                  ),
+                    S3OptionsFilter("status_id",
+                                    options = status_filter_options,
+                                    cols = 3,
+                                    default = status_filter_defaults,
+                                    sort = False,
+                                    ),
+                    S3OptionsFilter("sector_id",
+                                    hidden = True,
+                                    options = lambda: s3_get_filter_opts("org_sector",
+                                                                         translate = True,
+                                                                         ),
+                                    ),
+                    S3OptionsFilter("case_activity_need.need_id",
+                                    options = lambda: s3_get_filter_opts("dvr_need",
+                                                                         translate = True,
+                                                                         ),
+                                    hidden = True,
+                                    ),
+                    #S3OptionsFilter("followup",
+                    #                label = T("Follow-up required"),
+                    #                options = {True: T("Yes"),
+                    #                           False: T("No"),
+                    #                           },
+                    #                cols = 2,
+                    #                hidden = True,
+                    #                ),
+                    #S3DateFilter("followup_date",
+                    #             cols = 2,
+                    #             hidden = True,
+                    #             ),
+                    ]
+
+                # Priority filter (unless pre-filtered to emergencies anyway)
+                if not emergencies:
+                    field = resource.table.priority
+                    priority_opts = OrderedDict(field.requires.options())
+                    priority_filter = S3OptionsFilter("priority",
+                                                      options = priority_opts,
+                                                      cols = 4,
+                                                      sort = False,
+                                                      )
+                    filter_widgets.insert(2, priority_filter)
+
+                # Can the user see cases from more than one org?
+                realms = auth.permission.permitted_realms("dvr_case", "read")
+                if realms is None:
+                    multiple_orgs = True
+                elif len(realms) > 1:
+                    otable = s3db.org_organisation
+                    query = (otable.pe_id.belongs(realms)) & \
+                            (otable.deleted == False)
+                    rows = db(query).select(otable.id)
+                    multiple_orgs = len(rows) > 1
+                else:
+                    multiple_orgs = False
+                if multiple_orgs:
+                    # Add org-filter widget
+                    filter_widgets.insert(1,
+                                          S3OptionsFilter("person_id$dvr_case.organisation_id"),
+                                          )
 
                 # Custom list fields
-                list_fields = [(T("ID"), "person_id$pe_label"),
-                               (T("Person"), "person_id"),
+                list_fields = ["priority",
+                               (T("Case"), "person_id"),
+                               "sector_id",
+                               "subject",
                                "start_date",
-                               "need_id",
-                               #"need_details",
-                               "emergency",
-                               (T("Interventions"),
-                                "response_type__link.response_type_id",
-                                ),
-                               #"activity_details",
-                               "followup",
-                               "followup_date",
-                               "completed",
+                               #"followup",
+                               #"followup_date",
+                               "status_id",
                                ]
 
-            # Custom list fields
-            resource.configure(list_fields = list_fields,
-                               )
+                # Reconfigure table
+                resource.configure(filter_widgets = filter_widgets,
+                                   list_fields = list_fields,
+                                   )
 
             return result
         s3.prep = custom_prep
@@ -1166,6 +1752,323 @@ def config(settings):
     settings.customise_dvr_case_appointment_controller = customise_dvr_case_appointment_controller
 
     # -------------------------------------------------------------------------
+    def customise_dvr_case_flag_resource(r, tablename):
+
+        table = current.s3db.dvr_case_flag
+
+        # Hide unwanted fields
+        unused = ("advise_at_check_in",
+                  "advise_at_check_out",
+                  "advise_at_id_check",
+                  "instructions",
+                  "deny_check_in",
+                  "deny_check_out",
+                  "allowance_suspended",
+                  "is_not_transferable",
+                  "is_external",
+                  )
+
+        for fieldname in unused:
+            field = table[fieldname]
+            field.readable = field.writable = False
+
+    settings.customise_dvr_case_flag_resource = customise_dvr_case_flag_resource
+
+    # -------------------------------------------------------------------------
+    def customise_dvr_response_action_resource(r, tablename):
+
+        s3db = current.s3db
+
+        table = s3db.dvr_response_action
+
+        # Custom format for case activity representation
+        field = table.case_activity_id
+        fmt = "%(pe_label)s %(last_name)s, %(first_name)s"
+        field.represent = s3db.dvr_CaseActivityRepresent(fmt = fmt,
+                                                         show_link = True,
+                                                         )
+
+    settings.customise_dvr_response_action_resource = customise_dvr_response_action_resource
+
+    # -------------------------------------------------------------------------
+    # Shelter Registry Settings
+    #
+    settings.cr.people_registration = False
+
+    # -------------------------------------------------------------------------
+    def cr_shelter_onaccept(form):
+        """
+            Custom onaccept for shelters:
+            * Update the Location for all linked Cases
+              (in case the Address has been updated)
+        """
+
+        db = current.db
+        s3db = current.s3db
+
+        try:
+            record_id = form.vars.id
+        except AttributeError:
+            return
+
+        if not record_id:
+            # Nothing we can do
+            return
+
+        # Reload the record (need site_id which is never in form.vars)
+        table = s3db.cr_shelter
+        shelter = db(table.id == record_id).select(table.location_id,
+                                                   table.site_id,
+                                                   limitby = (0, 1),
+                                                   ).first()
+
+        # If shelter were None here, then this shouldn't have been called
+        # in the first place => let it raise AttributeError
+        location_id = shelter.location_id
+        site_id = shelter.site_id
+
+        ctable = s3db.dvr_case
+        cases = db(ctable.site_id == site_id).select(ctable.person_id)
+        if cases:
+            person_ids = set(case.person_id for case in cases)
+            ptable = s3db.pr_person
+            db(ptable.id.belongs(person_ids)).update(
+                                            location_id = location_id,
+                                            # Indirect update by system rule,
+                                            # do not change modified_* fields:
+                                            modified_on = ptable.modified_on,
+                                            modified_by = ptable.modified_by,
+                                            )
+
+    # -------------------------------------------------------------------------
+    def cr_shelter_population():
+        """
+            Update the Population of all Shelters
+            * called onaccept from dvr_case
+        """
+
+        db = current.db
+        s3db = current.s3db
+
+        # Get the number of open cases per site_id
+        ctable = s3db.dvr_case
+        dtable = s3db.dvr_case_details
+        stable = s3db.dvr_case_status
+        join = stable.on(stable.id == ctable.status_id)
+        left = dtable.on((dtable.person_id == ctable.person_id) & \
+                         ((dtable.case_id == None) |
+                          (dtable.case_id == ctable.id)) & \
+                         (dtable.deleted == False))
+        today = current.request.utcnow.date()
+        query = (ctable.site_id != None) & \
+                (ctable.deleted == False) & \
+                (stable.is_closed == False) & \
+                ((dtable.on_site_from == None) | (dtable.on_site_from <= today)) & \
+                ((dtable.on_site_until == None) | (dtable.on_site_until >= today))
+
+        site_id = ctable.site_id
+        count = ctable.id.count()
+        rows = db(query).select(site_id,
+                                count,
+                                groupby = site_id,
+                                join = join,
+                                left = left,
+                                )
+
+        # Update shelter population count
+        stable = s3db.cr_shelter
+        for row in rows:
+            db(stable.site_id == row[site_id]).update(
+                population = row[count],
+                # Indirect update by system rule,
+                # do not change modified_* fields:
+                modified_on = stable.modified_on,
+                modified_by = stable.modified_by,
+                )
+
+    # -------------------------------------------------------------------------
+    def customise_cr_shelter_resource(r, tablename):
+
+        auth = current.auth
+        s3db = current.s3db
+
+        s3 = current.response.s3
+
+        # Disable name-validation of cr_shelter_type
+        import_prep = s3.import_prep
+        def custom_import_prep(data):
+
+            # Call standard import_prep
+            if import_prep:
+                from gluon.tools import callback
+                callback(import_prep, data, tablename="cr_shelter")
+
+            # Disable uniqueness validation for shelter type names,
+            # otherwise imports will fail before reaching de-duplicate
+            ttable = s3db.cr_shelter_type
+            field = ttable.name
+            field.requires = IS_NOT_EMPTY()
+
+            # Reset to standard (no need to repeat it)
+            s3.import_prep = import_prep
+
+        s3.import_prep = custom_import_prep
+
+        from s3 import S3LocationSelector, \
+                       S3SQLCustomForm
+
+        # Field configurations
+        table = s3db.cr_shelter
+
+        field = table.organisation_id
+        user_org = auth.user.organisation_id if auth.user else None
+        if user_org:
+            field.default = user_org
+
+        field = table.shelter_type_id
+        field.comment = None
+
+        # Hide L2 Government District
+        field = table.location_id
+        field.widget = S3LocationSelector(levels = gis_levels,
+                                          show_address = True,
+                                          )
+
+        # Custom form
+        crud_form = S3SQLCustomForm("name",
+                                    "organisation_id",
+                                    "shelter_type_id",
+                                    "location_id",
+                                    "phone",
+                                    "status",
+                                    "comments",
+                                    )
+
+
+        # Custom list fields
+        list_fields = [(T("Name"), "name"),
+                       (T("Type"), "shelter_type_id"),
+                       "organisation_id",
+                       (T("Number of Cases"), "population"),
+                       "status",
+                       ]
+
+        # Which levels of Hierarchy are we using?
+        #levels = current.gis.get_relevant_hierarchy_levels()
+        lfields = ["location_id$%s" % level for level in gis_levels]
+        list_fields[-1:-1] = lfields
+
+        s3db.configure("cr_shelter",
+                       crud_form = crud_form,
+                       list_fields = list_fields,
+                       )
+
+        # Add custom onaccept
+        s3db.add_custom_callback(tablename,
+                                 "onaccept",
+                                 cr_shelter_onaccept,
+                                 )
+
+    settings.customise_cr_shelter_resource = customise_cr_shelter_resource
+
+    # -------------------------------------------------------------------------
+    def customise_cr_shelter_controller(**attr):
+
+        s3 = current.response.s3
+
+        # Custom prep
+        standard_prep = s3.prep
+        def custom_prep(r):
+
+            # Call standard prep
+            if callable(standard_prep):
+                result = standard_prep(r)
+            else:
+                result = True
+
+            if r.interactive:
+
+                resource = r.resource
+
+                # Customise filter widgets
+                filter_widgets = resource.get_config("filter_widgets")
+                if filter_widgets:
+
+                    from s3 import S3TextFilter
+
+                    custom_filters = []
+                    for fw in filter_widgets:
+                        if fw.field == "capacity_day":
+                            continue
+                        elif fw.field == "location_id":
+                            fw.opts["levels"] = gis_levels
+                        if not isinstance(fw, S3TextFilter) and \
+                           fw.field != "shelter_type_id":
+                            fw.opts["hidden"] = True
+                        custom_filters.append(fw)
+
+                    resource.configure(filter_widgets = custom_filters)
+
+            return result
+
+        s3.prep = custom_prep
+
+        # Custom rheader
+        attr = dict(attr)
+        attr["rheader"] = drk_cr_rheader
+
+        return attr
+
+    settings.customise_cr_shelter_controller = customise_cr_shelter_controller
+
+    # -------------------------------------------------------------------------
+    def customise_org_organisation_controller(**attr):
+
+        s3 = current.response.s3
+
+        # Custom prep
+        standard_prep = s3.prep
+        def custom_prep(r):
+
+            # Call standard prep
+            if callable(standard_prep):
+                result = standard_prep(r)
+            else:
+                result = True
+
+            # Disable creation of new root orgs unless user is ORG_GROUP_ADMIN
+            if r.method != "hierarchy" and \
+               (r.representation != "popup" or not r.get_vars.get("hierarchy")):
+                auth = current.auth
+                sysroles = sysroles = auth.get_system_roles()
+                insertable = auth.s3_has_roles((sysroles.ADMIN,
+                                                sysroles.ORG_GROUP_ADMIN,
+                                                ))
+                r.resource.configure(insertable = insertable)
+
+            return result
+
+        s3.prep = custom_prep
+
+        return attr
+
+    settings.customise_org_organisation_controller = customise_org_organisation_controller
+
+    # -------------------------------------------------------------------------
+    def org_site_check(site_id):
+        """ Custom tasks for scheduled site checks """
+
+        # Tasks which are not site-specific
+        if site_id == "all":
+
+            # Update all shelter populations
+            # NB will be db.committed by org_site_check in models/tasks.py
+            current.log.info("Updating all shelter populations")
+            cr_shelter_population()
+
+    settings.org.site_check = org_site_check
+
+    # -------------------------------------------------------------------------
     def customise_org_facility_resource(r, tablename):
 
         s3db = current.s3db
@@ -1250,6 +2153,50 @@ def config(settings):
     settings.customise_org_facility_controller = customise_org_facility_controller
 
     # -------------------------------------------------------------------------
+    def customise_org_sector_resource(r, tablename):
+
+        table = current.s3db.org_sector
+
+        field = table.location_id
+        field.readable = field.writable = False
+
+    settings.customise_org_sector_resource = customise_org_sector_resource
+
+    # -------------------------------------------------------------------------
+    # Project Module Settings
+    #
+    settings.project.mode_task = True
+    settings.project.projects = False
+    settings.project.sectors = False
+
+    # NB should not add or remove options, but just comment/uncomment
+    settings.project.task_status_opts = {#1: T("Draft"),
+                                         2: T("New"),
+                                         3: T("Assigned"),
+                                         #4: T("Feedback"),
+                                         #5: T("Blocked"),
+                                         6: T("On Hold"),
+                                         7: T("Canceled"),
+                                         #8: T("Duplicate"),
+                                         #9: T("Ready"),
+                                         #10: T("Verified"),
+                                         #11: T("Reopened"),
+                                         12: T("Completed"),
+                                         }
+
+    settings.project.task_time = False
+    settings.project.my_tasks_include_team_tasks = True
+
+    # -------------------------------------------------------------------------
+    #def customise_project_home():
+    #    """ Always go to task list """
+    #
+    #    from s3 import s3_redirect_default
+    #    s3_redirect_default(URL(f="task"))
+    #
+    #settings.customise_project_home = customise_project_home
+
+    # -------------------------------------------------------------------------
     def customise_project_task_resource(r, tablename):
         """
             Restrict list of assignees to just Staff/Volunteers
@@ -1264,36 +2211,32 @@ def config(settings):
                                     "status",
                                     "priority",
                                     "description",
-                                    "source",
-                                    S3SQLInlineLink("shelter_inspection_flag",
-                                                    field="inspection_flag_id",
-                                                    label=T("Shelter Inspection"),
-                                                    readonly=True,
-                                                    render_list=True,
-                                                    ),
+                                    #"source",
                                     "pe_id",
                                     "date_due",
                                     )
         s3db.configure("project_task",
                        crud_form = crud_form,
+                       update_realm = True,
                        )
+
+        accessible_query = current.auth.s3_accessible_query
 
         # Filter assignees to human resources
         htable = s3db.hrm_human_resource
         ptable = s3db.pr_person
-        query = (htable.deleted == False) & \
+        query = accessible_query("read", htable) & \
                 (htable.person_id == ptable.id)
         rows = db(query).select(ptable.pe_id)
         pe_ids = set(row.pe_id for row in rows)
 
         # ...and teams
         gtable = s3db.pr_group
-        query = (gtable.group_type == 3) & \
-                (gtable.deleted == False)
+        query = accessible_query("read", gtable) & \
+                (gtable.group_type == 3)
         rows = db(query).select(gtable.pe_id)
         pe_ids |= set(row.pe_id for row in rows)
 
-        from gluon import IS_EMPTY_OR
         s3db.project_task.pe_id.requires = IS_EMPTY_OR(
             IS_ONE_OF(db, "pr_pentity.pe_id",
                       s3db.pr_PersonEntityRepresent(show_label = False,
@@ -1396,30 +2339,30 @@ def config(settings):
            module_type = 10,
         )),
         ("msg", Storage(
-           name_nice = T("Messaging"),
-           #description = "Sends & Receives Alerts via Email & SMS",
-           restricted = True,
-           # The user-visible functionality of this module isn't normally required. Rather it's main purpose is to be accessed from other modules.
-           module_type = None,
+          name_nice = T("Messaging"),
+          #description = "Sends & Receives Alerts via Email & SMS",
+          restricted = True,
+          # The user-visible functionality of this module isn't normally required. Rather it's main purpose is to be accessed from other modules.
+          module_type = None,
         )),
-        ("supply", Storage(
-           name_nice = T("Supply Chain Management"),
-           #description = "Used within Inventory Management, Request Management and Asset Management",
-           restricted = True,
-           module_type = None, # Not displayed
-        )),
-        ("inv", Storage(
-           name_nice = T("Warehouses"),
-           #description = "Receiving and Sending Items",
-           restricted = True,
-           module_type = 4
-        )),
-        ("asset", Storage(
-           name_nice = T("Assets"),
-           #description = "Recording and Assigning Assets",
-           restricted = True,
-           module_type = 5,
-        )),
+        #("supply", Storage(
+        #   name_nice = T("Supply Chain Management"),
+        #   #description = "Used within Inventory Management, Request Management and Asset Management",
+        #   restricted = True,
+        #   module_type = None, # Not displayed
+        #)),
+        #("inv", Storage(
+        #   name_nice = T("Warehouses"),
+        #   #description = "Receiving and Sending Items",
+        #   restricted = True,
+        #   module_type = 4
+        #)),
+        #("asset", Storage(
+        #   name_nice = T("Assets"),
+        #   #description = "Recording and Assigning Assets",
+        #   restricted = True,
+        #   module_type = 5,
+        #)),
         # Vehicle depends on Assets
         #("vehicle", Storage(
         #    name_nice = T("Vehicles"),
@@ -1427,12 +2370,12 @@ def config(settings):
         #    restricted = True,
         #    module_type = 10,
         #)),
-        ("req", Storage(
-           name_nice = T("Requests"),
-           #description = "Manage requests for supplies, assets, staff or other resources. Matches against Inventories where supplies are requested.",
-           restricted = True,
-           module_type = 10,
-        )),
+        #("req", Storage(
+        #   name_nice = T("Requests"),
+        #   #description = "Manage requests for supplies, assets, staff or other resources. Matches against Inventories where supplies are requested.",
+        #   restricted = True,
+        #   module_type = 10,
+        #)),
         ("project", Storage(
            name_nice = T("Projects"),
            #description = "Tracking of Projects, Activities and Tasks",
@@ -1457,17 +2400,17 @@ def config(settings):
           restricted = True,
           module_type = 10,
         )),
-        ("event", Storage(
-           name_nice = T("Events"),
-           #description = "Activate Events (e.g. from Scenario templates) for allocation of appropriate Resources (Human, Assets & Facilities).",
-           restricted = True,
-           module_type = 10,
-        )),
-        ("security", Storage(
-           name_nice = T("Security"),
-           restricted = True,
-           module_type = 10,
-        )),
+        #("event", Storage(
+        #   name_nice = T("Events"),
+        #   #description = "Activate Events (e.g. from Scenario templates) for allocation of appropriate Resources (Human, Assets & Facilities).",
+        #   restricted = True,
+        #   module_type = 10,
+        #)),
+        #("security", Storage(
+        #   name_nice = T("Security"),
+        #   restricted = True,
+        #   module_type = 10,
+        #)),
         #("transport", Storage(
         #   name_nice = T("Transport"),
         #   restricted = True,
@@ -1480,6 +2423,49 @@ def config(settings):
            module_type = None,
         )),
     ])
+
+
+# =============================================================================
+def drk_cr_rheader(r, tabs=[]):
+    """ CR custom resource headers """
+
+    if r.representation != "html":
+        # Resource headers only used in interactive views
+        return None
+
+    from s3 import s3_rheader_resource, S3ResourceHeader
+
+    tablename, record = s3_rheader_resource(r)
+    if tablename != r.tablename:
+        resource = current.s3db.resource(tablename, id=record.id)
+    else:
+        resource = r.resource
+
+    rheader = None
+    rheader_fields = []
+
+    if record:
+        T = current.T
+
+        if tablename == "cr_shelter":
+
+            if not tabs:
+                tabs = [(T("Basic Details"), None),
+                        ]
+
+            rheader_fields = [["name",
+                               ],
+                              ["organisation_id",
+                               ],
+                              ["location_id",
+                               ],
+                              ]
+
+        rheader = S3ResourceHeader(rheader_fields, tabs)(r,
+                                                         table=resource.table,
+                                                         record=record,
+                                                         )
+    return rheader
 
 # =============================================================================
 def drk_dvr_rheader(r, tabs=[]):
@@ -1568,7 +2554,7 @@ def drk_dvr_rheader(r, tabs=[]):
                                    ],
                                   [(T("Name"), name),
                                    (T("Size of Family"), household_size),
-                                   (T("Facility"), facility),
+                                   (T("Shelter"), facility),
                                    ],
                                   ["date_of_birth",
                                    ],
@@ -1587,7 +2573,6 @@ def drk_dvr_rheader(r, tabs=[]):
                                 )
 
                 # Add profile picture
-                from gluon import A, URL
                 from s3 import s3_avatar_represent
                 record_id = record.id
                 rheader.insert(0, A(s3_avatar_represent(record_id,
@@ -1659,5 +2644,44 @@ def drk_org_rheader(r, tabs=[]):
                                                          record=record,
                                                          )
     return rheader
+
+# =============================================================================
+class PriorityRepresent(object):
+    """
+        Color-coded representation of priorities
+
+        @todo: generalize/move to s3utils?
+    """
+
+    def __init__(self, options, classes=None):
+        """
+            Constructor
+
+            @param options: the options (as dict or anything that can be
+                            converted into a dict)
+            @param classes: a dict mapping keys to CSS class suffixes
+        """
+
+        self.options = dict(options)
+        self.classes = classes
+
+    def represent(self, value, row=None):
+        """
+            Representation function
+
+            @param value: the value to represent
+        """
+
+        css_class = base_class = "prio"
+
+        classes = self.classes
+        if classes:
+            suffix = classes.get(value)
+            if suffix:
+                css_class = "%s %s-%s" % (css_class, base_class, suffix)
+
+        label = self.options.get(value)
+
+        return DIV(label, _class=css_class)
 
 # END =========================================================================
