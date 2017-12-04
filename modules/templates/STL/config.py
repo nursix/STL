@@ -186,6 +186,11 @@ def config(settings):
 
     settings.ui.hierarchy_cascade_option_in_tree = False
 
+    # Increase timeout on AJAX reports (ms)
+    settings.ui.report_timeout = 600000 # 10 mins, same as the webserver
+    # Increase the timeout on Report auto-submission
+    settings.ui.report_auto_submit = 1200 # 1.2s
+
     # =========================================================================
     # DVR Case Management
     #
@@ -1361,6 +1366,10 @@ def config(settings):
                                    "response_type__link.response_type_id",
                                    ),
                                "need__link.need_id",
+                               # @todo: consider using a filtered "home_address" component
+                               "person_id$address.location_id$L2",
+                               "completed",
+                               "person_id$dvr_case_details.referral_type_id",
                                ]
 
                 report_options = {
@@ -1369,8 +1378,8 @@ def config(settings):
                     "fact": [(T("Number of Beneficiaries"), "count(person_id)"),
                              (T("Number of Activities"), "count(id)"),
                              ],
-                    "defaults": {"rows": "service_id",
-                                 "cols": "project_id",
+                    "defaults": {"rows": "person_id$gender",
+                                 "cols": "person_id$person_details.nationality",
                                  "fact": "count(person_id)",
                                  "totals": True,
                                  },
@@ -1956,8 +1965,16 @@ def config(settings):
                 #Protection Response Sector,
                 #Interventions required
 
+                # Limit HR filter options to selectable HRs
+                requires = table.human_resource_id.requires
+                if hasattr(requires, "options"):
+                    hr_filter_opts = dict(opt for opt in requires.options() if opt[0])
+                else:
+                    hr_filter_opts = None
+
                 from s3 import S3DateFilter, \
                                S3HierarchyFilter, \
+                               S3LocationFilter, \
                                S3OptionsFilter, \
                                S3TextFilter, \
                                s3_get_filter_opts
@@ -1973,6 +1990,7 @@ def config(settings):
                                                     cascade_select = True,
                                                     ),
                                   S3OptionsFilter("human_resource_id",
+                                                  options = hr_filter_opts,
                                                   ),
                                   S3OptionsFilter("project_id",
                                                   options = s3_get_filter_opts("project_project"),
@@ -1990,6 +2008,22 @@ def config(settings):
                                   S3HierarchyFilter("response_type_case_activity.response_type_id",
                                                     hidden = True,
                                                     ),
+                                  S3OptionsFilter("person_id$dvr_case_details.referral_type_id",
+                                                  options = s3_get_filter_opts("dvr_referral_type"),
+                                                  label = T("Referred to Case Management by"),
+                                                  hidden = True,
+                                                  ),
+                                  # @todo: has scalability issues
+                                  # @todo: consider using a filtered "home_address" component
+                                  S3LocationFilter("person_id$address.location_id",
+                                                  hidden = True,
+                                                  ),
+                                  S3OptionsFilter("completed",
+                                                  hidden = True,
+                                                  ),
+                                  S3DateFilter("person_id$date_of_birth",
+                                               hidden = True,
+                                               ),
                                   S3DateFilter("start_date",
                                                hidden = True,
                                                ),
@@ -2455,8 +2489,9 @@ def config(settings):
                 result = True
 
             controller = r.controller
+            get_vars = r.get_vars
 
-            archived = r.get_vars.get("archived")
+            archived = get_vars.get("archived")
             if archived in ("1", "true", "yes"):
                 crud_strings = s3.crud_strings["pr_person"]
                 crud_strings["title_list"] = T("Invalid Cases")
@@ -2603,7 +2638,6 @@ def config(settings):
                         from s3 import S3DateFilter, \
                                        S3HierarchyFilter, \
                                        S3LocationFilter, \
-                                       S3LocationSelector, \
                                        S3OptionsFilter, \
                                        S3SQLCustomForm, \
                                        S3SQLInlineComponent, \
@@ -2710,7 +2744,7 @@ def config(settings):
                                 if widget.field == "dvr_case.status_id":
                                     status_filter = widget
                                     status_filter.opts.default = None
-                                    status_filter.opts.hidden = "closed" in r.get_vars
+                                    status_filter.opts.hidden = "closed" in get_vars
                                     break
 
                         # Limit HR filter options to selectable HRs
@@ -2719,6 +2753,10 @@ def config(settings):
                             hr_filter_opts = dict(opt for opt in requires.options() if opt[0])
                         else:
                             hr_filter_opts = None
+
+                        # Limit gender filter options
+                        gender_opts = dict(s3db.pr_gender_opts)
+                        del gender_opts[1] # Remove "unknown"
 
                         # Custom filter widgets
                         filter_widgets = [
@@ -2751,11 +2789,26 @@ def config(settings):
                                             hidden = True,
                                             ),
                             S3OptionsFilter("gender",
+                                            options = gender_opts,
                                             hidden = True,
                                             ),
+                            # Virtual field filter not scalable
+                            #S3OptionsFilter("age_group",
+                            #                hidden = True,
+                            #                ),
                             S3HierarchyFilter("dvr_case_activity.service_id",
                                               lookup = "org_service",
                                               none = "None",
+                                              hidden = True,
+                                              ),
+                            S3HierarchyFilter("dvr_case_activity.need__link.need_id",
+                                              lookup = "dvr_need",
+                                              label = T("Protection Response Sector"),
+                                              hidden = True,
+                                              ),
+                            S3HierarchyFilter("dvr_case_activity.vulnerability_type__link.vulnerability_type_id",
+                                              lookup = "dvr_vulnerability_type",
+                                              label = "Protection Assessment",
                                               hidden = True,
                                               ),
                             S3OptionsFilter("dvr_case_activity.project_id",
@@ -2799,6 +2852,10 @@ def config(settings):
                                          label = T("Activity End Date"),
                                          hidden = True,
                                          ),
+                            S3DateFilter("dvr_case_activity.start_date",
+                                         label = T("Protection Response Opened on"),
+                                         hidden = True,
+                                         ),
                             ]
 
                         if status_filter:
@@ -2836,7 +2893,10 @@ def config(settings):
                                          "person_details.nationality",
                                          "dvr_case.status_id",
                                          "dvr_case_activity.service_id",
+                                         (T("Protection Response Sector"),"dvr_case_activity.dvr_case_activity_need.need_id"),
+                                         (T("Protection Assessment"), "dvr_case_activity.dvr_vulnerability_type_case_activity.vulnerability_type_id"),
                                          "age_group",
+                                         "location_id$L2",
                                          "dvr_case.date",
                                          )
 
@@ -2847,11 +2907,23 @@ def config(settings):
                                           "cols": report_fields,
                                           "fact": report_facts,
                                           "defaults": {
-                                              "rows": "dvr_case_activity.service_id",
+                                              "rows": "gender",
                                               "cols": "person_details.nationality",
                                               "fact": report_facts[0],
                                               }
                                           }
+
+                        # Drop DoB extra field unless age_group is used as report axis,
+                        # NB does not detect age_group as default axis, so this would
+                        #    require a manual workaround
+                        if "~.age_group" not in (get_vars.get("rows"),
+                                                 get_vars.get("cols")):
+                            extra_fields = resource.get_config("extra_fields")
+                            if extra_fields:
+                                extra_fields = [s for s in extra_fields
+                                                  if s != "date_of_birth"]
+                            resource.configure(extra_fields = extra_fields or None)
+
                         resource.configure(report_options = report_options,
                                            )
 

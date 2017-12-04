@@ -1407,6 +1407,16 @@ def notify_approver():
                 subject = "%s: Alert Approval Required" % settings.get_system_name_short()
                 url = "%s%s" % (settings.get_base_public_url(),
                                 URL(c="cap", f="alert", args=[alert_id, "review"]))
+                try:
+                    from pyshorteners import Shortener
+                except ImportError:
+                    pass
+                else:
+                    try:
+                        url = s3_str(Shortener('Tinyurl', timeout=3).short(url))
+                    except:
+                        pass
+                        
                 message = """
 Hello Approver,
 %(full_name)s has created the alert message.
@@ -1414,9 +1424,18 @@ Your action is required to approve or reject the message.
 Please go to %(url)s to complete the actions.\n
 Remember to verify the content before approving by using Edit button.""" % \
                         {"full_name": full_name, "url": url}
-                msg.send_by_pe_id(pe_ids, subject, message)
+                msg.send_by_pe_id(pe_ids,
+                                  subject,
+                                  message,
+                                  alert_id=alert_id,
+                                  )
                 try:
-                    msg.send_by_pe_id(pe_ids, subject, message, contact_method = "SMS")
+                    msg.send_by_pe_id(pe_ids,
+                                      subject,
+                                      message,
+                                      contact_method="SMS",
+                                      alert_id=alert_id,
+                                      )
                 except ValueError:
                     current.log.error("No SMS Handler defined!")
                 session.confirmation = T("Alert Approval Notified")
