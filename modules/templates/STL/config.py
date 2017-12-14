@@ -188,8 +188,8 @@ def config(settings):
 
     # Increase timeout on AJAX reports (ms)
     settings.ui.report_timeout = 600000 # 10 mins, same as the webserver
-    # Increase the timeout on Report auto-submission
-    settings.ui.report_auto_submit = 1200 # 1.2s
+    # Disable report auto-submit
+    settings.ui.report_auto_submit = 0
 
     # =========================================================================
     # DVR Case Management
@@ -1378,11 +1378,11 @@ def config(settings):
                     "fact": [(T("Number of Beneficiaries"), "count(person_id)"),
                              (T("Number of Activities"), "count(id)"),
                              ],
-                    "defaults": {"rows": "person_id$gender",
-                                 "cols": "person_id$person_details.nationality",
-                                 "fact": "count(person_id)",
-                                 "totals": True,
-                                 },
+                    #"defaults": {"rows": "person_id$gender",
+                    #             "cols": "person_id$person_details.nationality",
+                    #             "fact": "count(person_id)",
+                    #             "totals": True,
+                    #             },
                     }
 
                 component.configure(report_options = report_options,
@@ -2258,12 +2258,12 @@ def config(settings):
 
         # Add contacts-method
         if r.controller == "dvr":
+
+            # Use pr_Contacts as contacts-method
             s3db.set_method("pr", "person",
                             method = "contacts",
                             action = s3db.pr_Contacts,
                             )
-
-        if r.controller == "dvr":
 
             from s3 import IS_PERSON_GENDER
 
@@ -2400,11 +2400,10 @@ def config(settings):
             ptable.pe_label.default = template % (code, next_id)
 
     # -------------------------------------------------------------------------
-    def customise_pr_person_controller(**attr):
+    def get_service_ids():
 
         db = current.db
         s3db = current.s3db
-        s3 = current.response.s3
 
         # Get service IDs
         stable = s3db.org_service
@@ -2418,10 +2417,11 @@ def config(settings):
                                 )
 
         # Group service IDs by root service
-        mh_service_ids = []
-        is_service_ids = []
-        pss_service_ids = []
-        service_ids = pss_service_ids
+        mh_ids = []
+        is_ids = []
+        ps_ids = []
+        sids = ps_ids
+
         group = set()
         root_service = None
         for row in rows:
@@ -2432,7 +2432,7 @@ def config(settings):
                 # Different root service => new group
                 if group:
                     # Add previous group to its service_ids array
-                    service_ids.extend(group)
+                    sids.extend(group)
                 # Start new group
                 group = set()
                 root_service = row.root_service
@@ -2442,41 +2442,66 @@ def config(settings):
                 # => choose the right service_ids array for the group
                 name = row.name
                 if name == INDIVIDUAL_SUPPORT:
-                    service_ids = is_service_ids
+                    sids = is_ids
                 elif name == MENTAL_HEALTH:
-                    service_ids = mh_service_ids
+                    sids = mh_ids
                 else:
                     # Everything else is PSS
-                    service_ids = pss_service_ids
+                    sids = ps_ids
 
             group.add(row.id)
 
         # Add the last group to its service_ids array
-        service_ids.extend(group)
+        sids.extend(group)
 
-        # Custom activity components (differentiated by service type)
-        s3db.add_components("pr_person",
-                            dvr_case_activity = (
-                                {"name": "case_activity",
-                                    "joinby": "person_id",
-                                    "filterby": {
-                                        "service_id": is_service_ids,
+        return {"mh": mh_ids, "is": is_ids, "ps": ps_ids}
+
+    # -------------------------------------------------------------------------
+    def configure_case_activity_components(service_ids):
+
+        current.s3db.add_components("pr_person",
+                                    dvr_case_activity = (
+                                        {"name": "case_activity",
+                                            "joinby": "person_id",
+                                            "filterby": {
+                                                "service_id": service_ids["is"],
+                                                },
                                         },
-                                },
-                                {"name": "mh_activity",
-                                    "joinby": "person_id",
-                                    "filterby": {
-                                        "service_id": mh_service_ids,
+                                        {"name": "mh_activity",
+                                            "joinby": "person_id",
+                                            "filterby": {
+                                                "service_id": service_ids["mh"],
+                                                },
                                         },
-                                },
-                                {"name": "pss_activity",
-                                    "joinby": "person_id",
-                                    "filterby": {
-                                        "service_id": pss_service_ids,
+                                        {"name": "pss_activity",
+                                            "joinby": "person_id",
+                                            "filterby": {
+                                                "service_id": service_ids["ps"],
+                                                },
                                         },
-                                },
-                               ),
-                            )
+                                       ),
+                                    )
+
+    # -------------------------------------------------------------------------
+    def customise_pr_person_controller(**attr):
+
+        db = current.db
+        s3db = current.s3db
+        s3 = current.response.s3
+
+        # Split case activity tabs by service type
+        # NB this must happen before request parsing, so can neither be prep
+        #    nor customise_resource; but should still perform the service_id
+        #    look-up only when required, thus checking request args here:
+        args = current.request.args
+        if args and len(args) > 1 and \
+           args[1] in ("case_activity", "mh_activity", "pss_activity"):
+            service_ids = s3.stl_service_ids
+            if not service_ids:
+                s3.stl_service_ids = service_ids = get_service_ids()
+            configure_case_activity_components(service_ids)
+        else:
+            configure_case_activity_components({"is": [], "mh": [], "ps": []})
 
         # Custom prep
         standard_prep = s3.prep
@@ -2512,7 +2537,7 @@ def config(settings):
                     from s3 import IS_ONE_OF, S3HierarchyWidget
 
                     if r.interactive and not r.record and \
-                       r.method == "create" or not r.method:
+                       r.method == "create": # or not r.method:
                         set_default_pe_label()
 
                     ctable = s3db.dvr_case
@@ -2882,6 +2907,8 @@ def config(settings):
                                    ]
 
                     resource.configure(list_fields = list_fields,
+                                       listadd = False,
+                                       addbtn = True,
                                        )
 
                     if r.method == "report":
@@ -2906,11 +2933,11 @@ def config(settings):
                         report_options = {"rows": report_fields,
                                           "cols": report_fields,
                                           "fact": report_facts,
-                                          "defaults": {
-                                              "rows": "gender",
-                                              "cols": "person_details.nationality",
-                                              "fact": report_facts[0],
-                                              }
+                                          #"defaults": {
+                                          #    "rows": "gender",
+                                          #    "cols": "person_details.nationality",
+                                          #    "fact": report_facts[0],
+                                          #    }
                                           }
 
                         # Drop DoB extra field unless age_group is used as report axis,
