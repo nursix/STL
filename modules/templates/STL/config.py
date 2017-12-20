@@ -137,6 +137,9 @@ def config(settings):
     # http://eden.sahanafoundation.org/wiki/UserGuidelines/Admin/MapPrinting
     #settings.gis.print_button = True
 
+    # Enable scalability-optimized option lookups in location filters
+    settings.gis.location_filter_bigtable_lookups = True
+
     # =========================================================================
     # L10n Settings
     #
@@ -1898,6 +1901,9 @@ def config(settings):
         s3db = current.s3db
         s3 = current.response.s3
 
+        # Enable scalability-optimized strategies
+        settings.base.bigtable = True
+
         # Custom prep
         standard_prep = s3.prep
         def custom_prep(r):
@@ -2013,11 +2019,10 @@ def config(settings):
                                                   label = T("Referred to Case Management by"),
                                                   hidden = True,
                                                   ),
-                                  # @todo: has scalability issues
-                                  # @todo: consider using a filtered "home_address" component
-                                  S3LocationFilter("person_id$address.location_id",
-                                                  hidden = True,
-                                                  ),
+                                  # Not scalable
+                                  #S3LocationFilter("person_id$address.location_id",
+                                  #                hidden = True,
+                                  #                ),
                                   S3OptionsFilter("completed",
                                                   hidden = True,
                                                   ),
@@ -2489,6 +2494,9 @@ def config(settings):
         s3db = current.s3db
         s3 = current.response.s3
 
+        # Enable scalability-optimized strategies
+        settings.base.bigtable = True
+
         # Split case activity tabs by service type
         # NB this must happen before request parsing, so can neither be prep
         #    nor customise_resource; but should still perform the service_id
@@ -2844,9 +2852,10 @@ def config(settings):
                                             options = hr_filter_opts,
                                             hidden = True,
                                             ),
-                            S3LocationFilter("address.location_id",
-                                             hidden = True,
-                                             ),
+                            # Not scalable:
+                            #S3LocationFilter("address.location_id",
+                            #                 hidden = True,
+                            #                 ),
                             S3OptionsFilter("person_details.marital_status",
                                             options = s3db.pr_marital_status_opts,
                                             hidden = True,
@@ -3479,6 +3488,7 @@ def stl_dvr_rheader(r, tabs=[]):
                                         "dvr_case.organisation_id",
                                         "dvr_case.disclosure_consent",
                                         ],
+                                        limit = 1,
                                         represent = True,
                                         raw_data = True,
                                         ).rows

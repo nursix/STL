@@ -5424,6 +5424,15 @@ class S3ResourceData(object):
                    not supported (yet)
         """
 
+        db = current.db
+
+        # Suppress instantiation of LazySets in rows where we don't need them
+        if not as_rows and not groupby:
+            rname = db._referee_name
+            db._referee_name = None
+        else:
+            rname = None
+
         # The resource
         self.resource = resource
         self.table = table = resource.table
@@ -5530,9 +5539,12 @@ class S3ResourceData(object):
                 count_only = True
             if subselect or \
                getids and pagination or \
-               extra_tables != filter_tables:
+               extra_tables and extra_tables != filter_tables:
                 fq = True
                 count_only = False
+
+        # Shall we use scalability-optimized strategies?
+        bigtable = current.deployment_settings.get_base_bigtable()
 
         # Filter Query:
         # If we need to determine the number and/or ids of all matching
@@ -5541,11 +5553,16 @@ class S3ResourceData(object):
         ids = page = totalrows = None
         if fq:
             # Execute the filter query
+            if bigtable:
+                limitby = resource.limitby(start=start, limit=limit)
+            else:
+                limitby = None
             totalrows, ids = self.filter_query(query,
                                                join = filter_ijoins,
                                                left = filter_ljoins,
                                                getids = not count_only,
                                                orderby = orderby_aggr,
+                                               limitby = limitby,
                                                )
 
         # Simplify the master query if possible
@@ -5566,13 +5583,15 @@ class S3ResourceData(object):
                 if pagination and (efilter or vfilter):
                     master_ids = ids
                 else:
-                    totalrows = len(ids)
-                    limitby = resource.limitby(start=start, limit=limit)
-                    if limitby:
-                        page = ids[limitby[0]:limitby[1]]
+                    if bigtable:
+                        master_ids = page = ids
                     else:
-                        page = ids
-                    master_ids = page
+                        limitby = resource.limitby(start=start, limit=limit)
+                        if limitby:
+                            page = ids[limitby[0]:limitby[1]]
+                        else:
+                            page = ids
+                        master_ids = page
 
                 # Simplify master query
                 if page is not None and not page:
@@ -5802,7 +5821,7 @@ class S3ResourceData(object):
                                             joined_query,
                                             jfields,
                                             records,
-                                            represent=represent,
+                                            represent = represent,
                                             )
 
             # Re-combine and represent the records
@@ -5818,9 +5837,10 @@ class S3ResourceData(object):
                     # results = {RecordID: {ColumnName: Representation}}
                     results = render(dfield,
                                      results,
-                                     none=NONE,
-                                     raw_data=raw_data,
-                                     show_links=show_links)
+                                     none = NONE,
+                                     raw_data = raw_data,
+                                     show_links = show_links,
+                                     )
 
                 else:
                     # results = {RecordID: {ColumnName: Value}}
@@ -5842,6 +5862,10 @@ class S3ResourceData(object):
                         result[colname] = data
 
             self.rows = [results[record_id] for record_id in page]
+
+        if rname:
+            # Restore referee name
+            db._referee_name = rname
 
     # -------------------------------------------------------------------------
     def init_field_data(self, rfields):
@@ -5999,20 +6023,25 @@ class S3ResourceData(object):
         return expr, aggr, fields, tables
 
     # -------------------------------------------------------------------------
-    def filter_query(self, query,
+    def filter_query(self,
+                     query,
                      join=None,
                      left=None,
                      getids=False,
-                     orderby=None):
+                     limitby=None,
+                     orderby=None,
+                     ):
         """
             Execute a query to determine the number/record IDs of all
             matching rows
 
-            @param query: the query to execute
-            @param join: the inner joins for this query
-            @param left: the left joins for this query
-            @param getids: also extract the IDs if all matching records
-            @param orderby: ORDERBY expression for this query
+            @param query: the filter query
+            @param join: the inner joins for the query
+            @param left: the left joins for the query
+            @param getids: extract the IDs of matching records
+            @param limitby: tuple of indices (start, end) to extract only
+                            a limited set of IDs
+            @param orderby: ORDERBY expression for the query
 
             @return: tuple of (TotalNumberOfRecords, RecordIDs)
         """
@@ -6021,39 +6050,82 @@ class S3ResourceData(object):
 
         table = self.table
 
-        if getids:
-            field = table._id
-            #distinct = False
-            groupby = field
-        else:
-            field = table._id.count()
-            #distinct = True # has no effect
-            groupby = None
-            orderby = None # don't need order if just counting
-
         # Temporarily deactivate virtual fields
         vf = table.virtualfields
         osetattr(table, "virtualfields", [])
 
-        # Extract the data
-        rows = db(query).select(field,
-                                join=join,
-                                left=left,
-                                #distinct=distinct,
-                                orderby=orderby,
-                                groupby=groupby,
-                                cacheable=True)
+        if getids and limitby:
+            # Large result sets expected on average (settings.base.bigtable)
+            # => effort almost independent of result size, much faster
+            #    for large and very large filter results
+            start = limitby[0]
+            limit = limitby[1] - start
+
+            # Don't penalize the smallest filter results (=effective filtering)
+            if limit:
+                maxids = max(limit, 200)
+                limitby_ = (start, maxids)
+            else:
+                limitby_ = None
+
+
+            # Extract record IDs
+            field = table._id
+            rows = db(query).select(field,
+                                    join = join,
+                                    left = left,
+                                    limitby = limitby_,
+                                    orderby = orderby,
+                                    groupby = field,
+                                    cacheable = True,
+                                    )
+            pkey = str(field)
+            results = rows[:limit] if limit else rows
+            ids = [row[pkey] for row in results]
+
+            totalids = len(rows)
+            if limit and totalids >= maxids or start != 0 and not totalids:
+                # Count all matching records
+                cnt = table._id.count()
+                row = db(query).select(cnt,
+                                       join = join,
+                                       left = left,
+                                       cacheable = True,
+                                       ).first()
+                totalrows = row[cnt]
+            else:
+                # We already know how many there are
+                totalrows = start + totalids
+
+        elif getids:
+            # Extract all matching IDs, then count them in Python
+            # => effort proportional to result size, slightly faster
+            #    than counting separately for small filter results
+            field = table._id
+            rows = db(query).select(field,
+                                    join=join,
+                                    left=left,
+                                    orderby = orderby,
+                                    groupby = field,
+                                    cacheable = True,
+                                    )
+            pkey = str(field)
+            ids = [row[pkey] for row in rows]
+            totalrows = len(ids)
+
+        else:
+            # Only count, do not extract any IDs (constant effort)
+            field = table._id.count()
+            rows = db(query).select(field,
+                                    join = join,
+                                    left = left,
+                                    cacheable = True,
+                                    )
+            ids = None
+            totalrows = rows.first()[field]
 
         # Restore the virtual fields
         osetattr(table, "virtualfields", vf)
-
-        if getids:
-            pkey = str(table._id)
-            ids = [row[pkey] for row in rows]
-            totalrows = len(ids)
-        else:
-            ids = None
-            totalrows = rows.first()[field]
 
         return totalrows, ids
 
@@ -6226,6 +6298,7 @@ class S3ResourceData(object):
         """
 
         s3db = current.s3db
+
         ljoins = self.ljoins
         table = self.resource.table
         pkey = str(table._id)
@@ -6236,8 +6309,9 @@ class S3ResourceData(object):
 
         # Get all left joins for subtable
         tnames = ljoins.extend(l) + list(fields["_left"].tables)
-        sjoins = ljoins.as_list(tablenames=tnames,
-                                    aqueries=self.aqueries)
+        sjoins = ljoins.as_list(tablenames = tnames,
+                                aqueries = self.aqueries,
+                                )
         if not sjoins:
             return records
         del fields["_left"]
@@ -6252,18 +6326,19 @@ class S3ResourceData(object):
         sfields.insert(0, table._id)
 
         # Retrieve the subtable rows
-        rows = current.db(query).select(left=sjoins,
-                                        distinct=True,
-                                        cacheable=True,
+        rows = current.db(query).select(left = sjoins,
+                                        distinct = True,
+                                        cacheable = True,
                                         *sfields)
 
         # Extract and merge the data
         records = self.extract(rows,
                                pkey,
                                extract,
-                               records=records,
-                               join=True,
-                               represent=represent)
+                               records = records,
+                               join = True,
+                               represent = represent,
+                               )
 
         return records
 
